@@ -2,7 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ConfigService } from '@nestjs/config';
 
-function parseOrigins(v?: string) {
+function parseOrigins(v?: string): string[] {
   // Ex: "http://localhost:5173,https://intra.minhaempresa.local"
   return (v ?? 'http://localhost:5173')
     .split(',')
@@ -10,7 +10,7 @@ function parseOrigins(v?: string) {
     .filter(Boolean);
 }
 
-async function bootstrap() {
+async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
   const config = app.get(ConfigService);
 
@@ -23,6 +23,14 @@ async function bootstrap() {
     allowedHeaders: ['Content-Type', 'Authorization'],
   });
 
+  // Habilita shutdown correto do Nest (Prisma desconecta via onModuleDestroy)
+  app.enableShutdownHooks();
+
   await app.listen(3000);
 }
-bootstrap();
+
+// Evita erro do ESLint "no-floating-promises"
+bootstrap().catch((err) => {
+  console.error('❌ Erro ao iniciar aplicação:', err);
+  process.exit(1);
+});

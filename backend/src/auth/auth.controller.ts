@@ -6,13 +6,18 @@ import {
   Post,
   Req,
   UseGuards,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   @Post('login')
   @HttpCode(200)
@@ -22,7 +27,25 @@ export class AuthController {
 
   @Get('me')
   @UseGuards(JwtAuthGuard)
-  me(@Req() req: any) {
-    return req.user;
+  async me(@Req() req: any) {
+    const userId = req.user?.sub;
+    if (!userId) throw new UnauthorizedException('Token inválido');
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        username: true,
+        name: true,
+        isActive: true,
+        mustChangePassword: true,
+        createdAt: true,
+        lastLoginAt: true,
+      },
+    });
+
+    if (!user || !user.isActive) throw new UnauthorizedException('Usuário inválido');
+
+    return user;
   }
 }

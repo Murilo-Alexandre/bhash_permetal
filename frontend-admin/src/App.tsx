@@ -6,8 +6,11 @@ import { AdminLoginPage } from "./pages/AdminLoginPage";
 import { AdminDashboard } from "./pages/AdminDashboard";
 import { AdminAppConfigPage } from "./pages/AdminAppConfigPage";
 import { AdminFirstLoginPage } from "./pages/AdminFirstLoginPage";
+import { AdminUsersPage } from "./pages/AdminUsersPage";
+import { AdminAuditPage } from "./pages/AdminAuditPage";
+import { AdminOrgPage } from "./pages/AdminOrgPage"; // ✅ novo
 
-type PageKey = "dashboard" | "appConfig";
+type PageKey = "dashboard" | "appConfig" | "users" | "org" | "audit"; // ✅ novo
 
 type Me = {
   id: string;
@@ -48,7 +51,6 @@ export default function App() {
 
   if (!isAuthenticated) return <AdminLoginPage />;
 
-  // aguardando /me
   if (loadingMe || !me) {
     return (
       <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", color: "var(--muted)" }}>
@@ -57,7 +59,6 @@ export default function App() {
     );
   }
 
-  // 🔒 trava tudo até trocar credenciais (somente superadmin faz sentido)
   if (me.mustChangeCredentials) {
     if (!me.isSuperAdmin) {
       logout();
@@ -110,6 +111,19 @@ export default function App() {
             <button onClick={() => setPage("appConfig")} style={tabBtn(page === "appConfig")}>
               Config do App
             </button>
+            <button onClick={() => setPage("users")} style={tabBtn(page === "users")}>
+              Usuários
+            </button>
+
+            {/* ✅ novo */}
+            <button onClick={() => setPage("org")} style={tabBtn(page === "org")}>
+              Empresas/Setores
+            </button>
+
+            <button onClick={() => setPage("audit")} style={tabBtn(page === "audit")}>
+              Auditoria
+            </button>
+
             <button
               onClick={logout}
               style={{
@@ -129,7 +143,17 @@ export default function App() {
       />
 
       <div style={{ flex: 1 }}>
-        {page === "dashboard" ? <AdminDashboard /> : <AdminAppConfigPage />}
+        {page === "dashboard" ? (
+          <AdminDashboard />
+        ) : page === "appConfig" ? (
+          <AdminAppConfigPage />
+        ) : page === "users" ? (
+          <AdminUsersPage />
+        ) : page === "org" ? (
+          <AdminOrgPage /> // ✅ novo
+        ) : (
+          <AdminAuditPage />
+        )}
       </div>
     </div>
   );

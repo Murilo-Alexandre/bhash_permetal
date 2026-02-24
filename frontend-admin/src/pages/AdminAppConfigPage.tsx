@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useAdminAuth } from "../adminAuth";
 import { useTheme } from "../theme";
+import { API_BASE } from "../api";
 
 type AppConfig = { primaryColor: string; logoUrl?: string | null };
 
@@ -266,5 +267,5 @@ function Card({ title, colSpan, children }: { title: string; colSpan: number; ch
 
 function withApiBase(url: string) {
   if (/^https?:\/\//i.test(url)) return url;
-  return `http://localhost:3000${url}`;
+  return `${API_BASE}${url}`;
 }

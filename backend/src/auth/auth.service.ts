@@ -27,7 +27,6 @@ export class AuthService {
       data: { lastLoginAt: new Date() },
     });
 
-    // ✅ token do CHAT (usuário)
     const payload = {
       sub: user.id,
       username: user.username,
@@ -43,6 +42,7 @@ export class AuthService {
         username: user.username,
         name: user.name,
         isActive: user.isActive,
+        mustChangePassword: user.mustChangePassword,
       },
     };
   }

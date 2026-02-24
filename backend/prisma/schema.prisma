@@ -7,22 +7,65 @@ datasource db {
 }
 
 /**
+ * Empresas (global)
+ * Ex: Permetal, Metalgrade, Tres-S...
+ */
+model Company {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  users User[]
+
+  @@map("companies")
+}
+
+/**
+ * Setores (global)
+ * Ex: PCP, Expedição, TI...
+ */
+model Department {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  users User[]
+
+  @@map("departments")
+}
+
+/**
  * Usuários DO CHAT (aparecem no chat)
  */
 model User {
-  id                String   @id @default(uuid())
-  username          String   @unique
-  name              String
-  passwordHash      String
-  isActive          Boolean  @default(true)
-  mustChangePassword Boolean @default(false) // ✅ novo
-  createdAt         DateTime @default(now())
+  id                 String   @id @default(uuid())
+  username           String   @unique
+  name               String   // Nome Completo
+
+  // Contato (para virar "ficha do contato" no chat)
+  email              String?
+  extension          String?  // ramal
+
+  passwordHash       String
+  isActive           Boolean  @default(true)
+  mustChangePassword Boolean  @default(false)
+  createdAt          DateTime @default(now())
   lastLoginAt        DateTime?
+
+  // Empresa/Setor (globais)
+  companyId          String?
+  departmentId       String?
+
+  company            Company?    @relation(fields: [companyId], references: [id])
+  department         Department? @relation(fields: [departmentId], references: [id])
 
   // Relações (chat)
   conversationsA Conversation[] @relation("ConversationUserA")
   conversationsB Conversation[] @relation("ConversationUserB")
   sentMessages   Message[]      @relation("MessageSender")
+
+  @@index([companyId])
+  @@index([departmentId])
 
   @@map("users")
 }
@@ -31,21 +74,21 @@ model User {
  * Admin DO PAINEL (NÃO aparece no chat)
  */
 model AdminAccount {
-  id                   String   @id @default(uuid())
-  username             String   @unique
-  name                 String
-  passwordHash         String
-  isActive             Boolean  @default(true)
+  id                    String   @id @default(uuid())
+  username              String   @unique
+  name                  String
+  passwordHash          String
+  isActive              Boolean  @default(true)
 
   // ✅ já existe no seu projeto (pelo seu /admin/auth/me)
-  isSuperAdmin         Boolean  @default(false)
-  mustChangeCredentials Boolean @default(false)
+  isSuperAdmin          Boolean  @default(false)
+  mustChangeCredentials Boolean  @default(false)
 
-  // ✅ novo: para admins comuns (ou qualquer admin que você criar)
-  mustChangePassword   Boolean  @default(false)
+  // ✅ para admins comuns (ou qualquer admin que você criar)
+  mustChangePassword    Boolean  @default(false)
 
-  createdAt            DateTime @default(now())
-  lastLoginAt          DateTime?
+  createdAt             DateTime @default(now())
+  lastLoginAt           DateTime?
 
   @@map("admin_accounts")
 }
