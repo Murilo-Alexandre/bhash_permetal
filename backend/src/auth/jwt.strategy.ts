@@ -31,17 +31,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         name: true,
         isActive: true,
         mustChangePassword: true,
-        // ✅ novos campos (precisam existir no Prisma)
-        sector: true,
-        company: true,
-      } as any,
+        companyId: true,
+        departmentId: true,
+      },
     });
 
     if (!user || !user.isActive) {
       throw new UnauthorizedException('Conta desativada');
     }
 
-    // Isso vira req.user e é o que /auth/me retorna
     return {
       type: 'user',
       sub: user.id,
@@ -50,8 +48,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       name: user.name,
       mustChangePassword: !!user.mustChangePassword,
       role: 'USER',
-      sector: (user as any).sector ?? null,
-      company: (user as any).company ?? null,
+      companyId: user.companyId ?? null,
+      departmentId: user.departmentId ?? null,
     };
   }
 }

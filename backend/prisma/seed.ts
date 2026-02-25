@@ -38,14 +38,13 @@ async function main() {
     create: { id: 'default', primaryColor, logoUrl: logoUrl ?? undefined },
   });
 
-  // 2) ✅ SuperAdmin (sempre existe 1)
+  // 2) SuperAdmin (sempre existe 1)
   const superUser = pickEnv('SEED_SUPERADMIN_USERNAME', 'superadmin')!;
   const superPass = pickEnv('SEED_SUPERADMIN_PASSWORD', 'ChangeMeNow!123456')!;
   const superName = pickEnv('SEED_SUPERADMIN_NAME', 'SuperAdmin')!;
 
   const superHash = await argon2.hash(superPass);
 
-  // Garante que existe exatamente UM superadmin (cria/atualiza por username)
   await prisma.adminAccount.upsert({
     where: { username: superUser },
     update: {
@@ -53,7 +52,7 @@ async function main() {
       passwordHash: superHash,
       isActive: true,
       isSuperAdmin: true,
-      mustChangeCredentials: true, // ✅ força troca no primeiro login
+      mustChangeCredentials: true, // força troca no primeiro login
     },
     create: {
       username: superUser,
@@ -61,16 +60,37 @@ async function main() {
       passwordHash: superHash,
       isActive: true,
       isSuperAdmin: true,
-      mustChangeCredentials: true, // ✅ força troca no primeiro login
+      mustChangeCredentials: true,
     },
   });
 
-  // (opcional) se existirem outros admins antigos "admin", mantém ou desativa
-  // Se você quiser limpar o legado automaticamente, descomenta:
-  // await prisma.adminAccount.updateMany({
-  //   where: { username: 'admin', isSuperAdmin: false },
-  //   data: { isActive: false },
-  // });
+  // 2.1) Admin normal de teste (adminteste)
+  const adminUser = pickEnv('SEED_ADMIN_USERNAME', 'adminteste')!;
+  const adminPass = pickEnv('SEED_ADMIN_PASSWORD', 'admin123')!;
+  const adminName = pickEnv('SEED_ADMIN_NAME', 'Administrador Teste')!;
+
+  const adminHash = await argon2.hash(adminPass);
+
+  await prisma.adminAccount.upsert({
+    where: { username: adminUser },
+    update: {
+      name: adminName,
+      passwordHash: adminHash,
+      isActive: true,
+      isSuperAdmin: false,
+      mustChangeCredentials: false,
+      mustChangePassword: true, // força trocar senha no primeiro login
+    },
+    create: {
+      username: adminUser,
+      name: adminName,
+      passwordHash: adminHash,
+      isActive: true,
+      isSuperAdmin: false,
+      mustChangeCredentials: false,
+      mustChangePassword: true,
+    },
+  });
 
   // 3) Users chat (cria usuarios teste)
   const u1 = pickEnv('SEED_USER1_USERNAME', 'userteste1')!;
@@ -84,9 +104,10 @@ async function main() {
   await upsertChatUser(u1, p1, n1);
   await upsertChatUser(u2, p2, n2);
 
-  console.log('✅ Seed OK: app_config + superadmin + 2 users chat');
+  console.log('✅ Seed OK: app_config + superadmin + adminteste + 2 users chat');
   console.log(`🔐 SuperAdmin inicial: ${superUser} / ${superPass}`);
-  console.log('⚠️ No primeiro login, será obrigatório trocar user e senha.');
+  console.log('⚠️ SuperAdmin: no primeiro login, será obrigatório trocar user e senha.');
+  console.log(`🧪 Admin teste: ${adminUser} / ${adminPass} (vai pedir troca de senha no primeiro login)`);
 }
 
 main()

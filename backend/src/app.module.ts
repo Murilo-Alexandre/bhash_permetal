@@ -24,10 +24,11 @@ import { AppConfigModule } from './app-config/app-config.module';
 
 import { PrismaModule } from './prisma/prisma.module';
 
-import { AdminPasswordsController } from './admin/admin-passwords.controller';
 import { AdminMePasswordController } from './admin/admin-me-password.controller';
 import { MeController } from './me/me.controller';
 import { AdminOrgController } from './admin/admin-org.controller';
+
+import { AdminUsersController } from './admin/admin-users.controller';
 
 @Module({
   imports: [
@@ -53,10 +54,9 @@ import { AdminOrgController } from './admin/admin-org.controller';
     AdminController,
     AdminMeController,
 
-    AdminPasswordsController,
+    AdminUsersController, // ✅ único controller de /admin/users
 
     AdminOrgController,
-
     AdminMePasswordController,
     MeController,
   ],

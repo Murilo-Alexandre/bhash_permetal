@@ -8,7 +8,6 @@ datasource db {
 
 /**
  * Empresas (global)
- * Ex: Permetal, Metalgrade, Tres-S...
  */
 model Company {
   id        String   @id @default(uuid())
@@ -40,7 +39,7 @@ model Department {
 model User {
   id                 String   @id @default(uuid())
   username           String   @unique
-  name               String   // Nome Completo
+  name               String
 
   // Contato (para virar "ficha do contato" no chat)
   email              String?
@@ -80,7 +79,7 @@ model AdminAccount {
   passwordHash          String
   isActive              Boolean  @default(true)
 
-  // ✅ já existe no seu projeto (pelo seu /admin/auth/me)
+  // ✅ já existe no projeto (pelo /admin/auth/me)
   isSuperAdmin          Boolean  @default(false)
   mustChangeCredentials Boolean  @default(false)
 

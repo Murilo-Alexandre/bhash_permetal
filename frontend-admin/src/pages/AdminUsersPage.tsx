@@ -5,8 +5,12 @@ type UserRow = {
   id: string;
   username: string;
   name: string; // Nome Completo
-  sector?: string | null;   // por enquanto string (vai virar label vindo de Department)
-  company?: string | null;  // por enquanto string (vai virar label vindo de Company)
+  department?: { id: string; name: string } | string | null;
+  company?: { id: string; name: string } | string | null;
+
+  // (opcional mas recomendado) se o backend já manda os IDs:
+  companyId?: string | null;
+  departmentId?: string | null;
   email?: string | null;
   extension?: string | null;
 
@@ -62,7 +66,9 @@ export function AdminUsersPage() {
       setCompanies(cRes.data.items ?? []);
       setDepartments(dRes.data.items ?? []);
     } catch (e) {
-      console.error("Erro ao carregar empresas/setores:", e);
+      setCompanies([]);
+      setDepartments([]);
+      setMsg("Falha ao carregar empresas/setores (verifique endpoints do backend).");
     }
   }
 
@@ -132,7 +138,7 @@ export function AdminUsersPage() {
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder='Buscar (ex: "pcp", "permetal", "pcp permetal")…'
+              placeholder='🔍Buscar'
               style={{
                 flex: 1,
                 minWidth: 260,
@@ -275,8 +281,8 @@ export function AdminUsersPage() {
                         {u.username}
                       </Td>
                       <Td style={{ fontWeight: 800 }}>{u.name}</Td>
-                      <Td style={{ color: "var(--muted)" }}>{u.sector ?? "—"}</Td>
-                      <Td style={{ color: "var(--muted)" }}>{u.company ?? "—"}</Td>
+                      <Td style={{ color: "var(--muted)" }}>{getLabel((u as any).department ?? (u as any).sector)}</Td>
+                      <Td style={{ color: "var(--muted)" }}>{getLabel(u.company)}</Td>
                       <Td style={{ color: "var(--muted)" }}>{u.email ?? "—"}</Td>
                       <Td style={{ color: "var(--muted)" }}>{u.extension ?? "—"}</Td>
                       <Td style={{ color: "var(--muted)" }}>{fmt(u.createdAt)}</Td>
@@ -370,8 +376,8 @@ export function AdminUsersPage() {
             name: editUser.name,
             email: editUser.email ?? "",
             extension: editUser.extension ?? "",
-            companyId: "",     // quando seu backend já devolver companyId/departmentId, trocamos aqui
-            departmentId: "",  // idem
+            companyId: editUser.companyId ?? "",
+            departmentId: editUser.departmentId ?? "",
             mustChangePassword: editUser.mustChangePassword,
             isActive: editUser.isActive,
           }}
@@ -493,6 +499,13 @@ function pagerBtn(disabled: boolean): React.CSSProperties {
     opacity: disabled ? 0.5 : 1,
     fontWeight: 800,
   };
+}
+
+function getLabel(v: any): string {
+  if (!v) return "—";
+  if (typeof v === "string") return v || "—";
+  if (typeof v === "object" && "name" in v) return String(v.name || "—");
+  return "—";
 }
 
 function fmt(d: string) {
@@ -720,19 +733,19 @@ function UserModal({
     <ModalShell title={title} onClose={onClose}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
         <Field colSpan={6} label="Username">
-          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="ex: murilo.alexandre" style={inputStyle()} />
+          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Exemplo: usuario.exemplo" style={inputStyle()} />
         </Field>
 
         <Field colSpan={6} label="Nome Completo">
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="ex: Murilo Arbarotti Alexandre" style={inputStyle()} />
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Exemplo: Usuário Exemplo da Silva" style={inputStyle()} />
         </Field>
 
         <Field colSpan={6} label="Email">
-          <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="ex: murilo@empresa.com.br" style={inputStyle()} />
+          <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Exemplo: usuario.exemplo@empresa.com.br" style={inputStyle()} />
         </Field>
 
         <Field colSpan={6} label="Ramal">
-          <input value={extension} onChange={(e) => setExtension(e.target.value)} placeholder="ex: 214" style={inputStyle()} />
+          <input value={extension} onChange={(e) => setExtension(e.target.value)} placeholder="Exemplo: 214" style={inputStyle()} />
         </Field>
 
         <Field colSpan={6} label="Empresa">
