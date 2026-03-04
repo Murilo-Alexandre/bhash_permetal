@@ -1,8 +1,12 @@
+// C:\dev\bhash\frontend-admin\src\pages\AdminHistoryPage.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { Socket } from "socket.io-client";
 import { useAdminAuth } from "../adminAuth";
 import { createAdminSocket } from "../socket";
 
+/** ============================
+ *  Types
+ *  ============================ */
 type Contact = {
   id: string;
   username: string;
@@ -66,6 +70,75 @@ type GlobalHit = {
 
 type ViewMode = "contacts" | "userConversations" | "conversation";
 
+/** ============================
+ *  Utils
+ *  ============================ */
+function fmt(d: string) {
+  try {
+    return new Date(d).toLocaleString();
+  } catch {
+    return d;
+  }
+}
+
+function sameDay(a: Date, b: Date) {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+function dateLabel(iso: string) {
+  const dt = new Date(iso);
+  const now = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(now.getDate() - 1);
+
+  if (sameDay(dt, now)) return "Hoje";
+  if (sameDay(dt, yesterday)) return "Ontem";
+  return dt.toLocaleDateString();
+}
+
+function escapeRegExp(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function HighlightText({
+  text,
+  query,
+  className,
+}: {
+  text: string;
+  query: string;
+  className?: string;
+}) {
+  const q = query.trim();
+  if (!q) return <span className={className}>{text}</span>;
+
+  const re = new RegExp(escapeRegExp(q), "gi");
+  const parts: React.ReactNode[] = [];
+  let last = 0;
+
+  for (const m of text.matchAll(re)) {
+    const idx = m.index ?? 0;
+    if (idx > last) parts.push(text.slice(last, idx));
+    parts.push(
+      <mark key={`${idx}-${m[0]}`} className="bhash-hl">
+        {text.slice(idx, idx + m[0].length)}
+      </mark>
+    );
+    last = idx + m[0].length;
+  }
+
+  if (last < text.length) parts.push(text.slice(last));
+
+  return <span className={className}>{parts}</span>;
+}
+
+/** ============================
+ *  Page
+ *  ============================ */
 export function AdminHistoryPage() {
   const { api, token, logout } = useAdminAuth();
 
@@ -101,8 +174,17 @@ export function AdminHistoryPage() {
   const [chatLoading, setChatLoading] = useState(false);
   const [chatMsg, setChatMsg] = useState<string | null>(null);
 
-  const [inChatSearch, setInChatSearch] = useState("");
-  const [inChatApplied, setInChatApplied] = useState("");
+  // ====== Busca WhatsApp-like dentro do chat ======
+  const [chatSearchOpen, setChatSearchOpen] = useState(false);
+  const [chatSearchQ, setChatSearchQ] = useState("");
+  const [chatSearchLoading, setChatSearchLoading] = useState(false);
+  const [chatSearchErr, setChatSearchErr] = useState<string | null>(null);
+  const [chatSearchHits, setChatSearchHits] = useState<Message[]>([]);
+  const [chatSearchNextCursor, setChatSearchNextCursor] = useState<string | null>(null);
+
+  // ====== “scroll pra mensagem” e destaque persistente ======
+  const [pendingScrollToId, setPendingScrollToId] = useState<string | null>(null);
+  const [highlightTerm, setHighlightTerm] = useState<string>(""); // termo a realçar dentro do chat
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -146,14 +228,18 @@ export function AdminHistoryPage() {
   const filteredContacts = useMemo(() => {
     const q = contactsQ.trim().toLowerCase();
     if (!q) return contacts;
-    return contacts.filter((c) => (c.name ?? "").toLowerCase().includes(q) || (c.username ?? "").toLowerCase().includes(q));
+    return contacts.filter(
+      (c) =>
+        (c.name ?? "").toLowerCase().includes(q) ||
+        (c.username ?? "").toLowerCase().includes(q)
+    );
   }, [contacts, contactsQ]);
 
   // ====== BUSCA GLOBAL ======
   async function runGlobalSearch() {
     const q = globalQ.trim();
-    if (q.length < 2) {
-      setGlobalErr("Digite pelo menos 2 caracteres.");
+    if (q.length < 1) {
+      setGlobalErr("Digite pelo menos 1 caractere.");
       setGlobalHits([]);
       return;
     }
@@ -161,15 +247,18 @@ export function AdminHistoryPage() {
     setGlobalLoading(true);
     setGlobalErr(null);
     try {
-      const res = await api.get<{ ok: boolean; items: GlobalHit[] }>("/admin/history/search", {
-        params: {
-          q,
-          page: 1,
-          pageSize: 60,
-          ...(companyId ? { companyId } : {}),
-          ...(departmentId ? { departmentId } : {}),
-        },
-      });
+      const res = await api.get<{ ok: boolean; items: GlobalHit[] }>(
+        "/admin/history/search",
+        {
+          params: {
+            q,
+            page: 1,
+            pageSize: 60,
+            ...(companyId ? { companyId } : {}),
+            ...(departmentId ? { departmentId } : {}),
+          },
+        }
+      );
       setGlobalHits(res.data.items ?? []);
     } catch (e: any) {
       if (e?.response?.status === 401) return logout();
@@ -188,7 +277,9 @@ export function AdminHistoryPage() {
     setUserConvsLoading(true);
     setUserConvsMsg(null);
     try {
-      const res = await api.get<{ ok: boolean; items: ConversationItem[] }>(`/admin/history/users/${u.id}/conversations`);
+      const res = await api.get<{ ok: boolean; items: ConversationItem[] }>(
+        `/admin/history/users/${u.id}/conversations`
+      );
       setUserConvs(res.data.items ?? []);
     } catch (e: any) {
       if (e?.response?.status === 401) return logout();
@@ -199,23 +290,41 @@ export function AdminHistoryPage() {
     }
   }
 
-  // ====== LOAD CHAT (mensagens) ======
-  async function loadFirstPage(conversationId: string, appliedQ: string) {
+  // ====== CHAT (mensagens) ======
+  async function fetchMessagesPage(args: {
+    conversationId: string;
+    take: number;
+    cursor?: string | null;
+    q?: string;
+  }) {
+    const { conversationId, take, cursor, q } = args;
+    const res = await api.get<PagedMessages>(
+      `/admin/history/conversations/${conversationId}/messages`,
+      {
+        params: {
+          take,
+          ...(cursor ? { cursor } : {}),
+          ...(q?.trim() ? { q: q.trim() } : {}),
+        },
+      }
+    );
+    return res.data;
+  }
+
+  async function loadFirstPage(conversationId: string) {
     setChatLoading(true);
     setChatMsg(null);
     try {
-      const res = await api.get<PagedMessages>(`/admin/history/conversations/${conversationId}/messages`, {
-        params: { take: 60, ...(appliedQ.trim() ? { q: appliedQ.trim() } : {}) },
-      });
+      const data = await fetchMessagesPage({ conversationId, take: 60 });
 
-      const items = res.data.items ?? [];
+      const items = data.items ?? [];
       setMessages(items);
-      setNextCursor(res.data.nextCursor ?? null);
-      setHasMore(!!res.data.nextCursor);
+      setNextCursor(data.nextCursor ?? null);
+      setHasMore(!!data.nextCursor);
 
       requestAnimationFrame(() => {
         const el = listRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+        if (el) el.scrollTop = el.scrollHeight; // vai pro fim
       });
     } catch (e: any) {
       if (e?.response?.status === 401) return logout();
@@ -238,19 +347,17 @@ export function AdminHistoryPage() {
 
     setChatLoading(true);
     try {
-      const res = await api.get<PagedMessages>(`/admin/history/conversations/${conversationId}/messages`, {
-        params: {
-          take: 60,
-          cursor: nextCursor,
-          ...(inChatApplied.trim() ? { q: inChatApplied.trim() } : {}),
-        },
+      const data = await fetchMessagesPage({
+        conversationId,
+        take: 60,
+        cursor: nextCursor,
       });
 
-      const newItems = res.data.items ?? [];
+      const newItems = data.items ?? [];
       setMessages((prev) => [...newItems, ...prev]);
 
-      setNextCursor(res.data.nextCursor ?? null);
-      setHasMore(!!res.data.nextCursor);
+      setNextCursor(data.nextCursor ?? null);
+      setHasMore(!!data.nextCursor);
 
       requestAnimationFrame(() => {
         const el2 = listRef.current;
@@ -266,17 +373,114 @@ export function AdminHistoryPage() {
     }
   }
 
+  function scrollToMessageId(messageId: string) {
+    const el = listRef.current;
+    if (!el) return;
+
+    const row = el.querySelector(`[data-mid="${messageId}"]`) as HTMLElement | null;
+    if (row) {
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+      row.classList.add("bhash-msg-flash");
+      window.setTimeout(() => row.classList.remove("bhash-msg-flash"), 1100);
+      return;
+    }
+  }
+
+  async function ensureMessageLoaded(conversationId: string, messageId: string) {
+    // tenta no que já carregou
+    if (messages.some((m) => m.id === messageId)) {
+      requestAnimationFrame(() => scrollToMessageId(messageId));
+      return;
+    }
+
+    // carrega páginas mais antigas até achar (limite de segurança)
+    let cursor = nextCursor;
+    let guard = 0;
+
+    setChatLoading(true);
+    try {
+      while (cursor && guard < 40) {
+        guard++;
+
+        const data = await fetchMessagesPage({
+          conversationId,
+          take: 80,
+          cursor,
+        });
+
+        const newItems = data.items ?? [];
+        setMessages((prev) => [...newItems, ...prev]);
+
+        cursor = data.nextCursor ?? null;
+        setNextCursor(cursor);
+        setHasMore(!!cursor);
+
+        // checa se veio
+        if (newItems.some((m) => m.id === messageId)) {
+          // espera render
+          await new Promise((r) => requestAnimationFrame(() => r(null)));
+          scrollToMessageId(messageId);
+          return;
+        }
+      }
+    } finally {
+      setChatLoading(false);
+    }
+  }
+
   async function openConversation(conv: ConversationItem) {
     setSelectedConv(conv);
     setMode("conversation");
-    setInChatSearch("");
-    setInChatApplied("");
-    await loadFirstPage(conv.id, "");
+
+    setChatSearchOpen(false);
+    setChatSearchQ("");
+    setChatSearchHits([]);
+    setChatSearchNextCursor(null);
+    setChatSearchErr(null);
+
+    setHighlightTerm("");
+    setPendingScrollToId(null);
+
+    await loadFirstPage(conv.id);
+  }
+
+  // ====== Abrir conversa via busca global ======
+  async function openFromGlobal(hit: GlobalHit) {
+    const a = hit.conversation.userA;
+    const b = hit.conversation.userB;
+
+    // cria um “selectedUser” fake só pra manter o header padrão (não afeta backend)
+    const fakeSelectedUser: Contact = { id: a.id, username: a.username, name: a.name };
+    setSelectedUser(fakeSelectedUser);
+
+    const conv: ConversationItem = {
+      id: hit.conversation.id,
+      updatedAt: hit.createdAt,
+      otherUser: { id: b.id, username: b.username, name: b.name },
+      lastMessage: null,
+    };
+
+    setSelectedConv(conv);
+    setMode("conversation");
+
+    // abre chat completo, mas com “meta” de rolar pra msg e realçar termo
+    setHighlightTerm(globalQ.trim());
+    setPendingScrollToId(hit.id);
+
+    setChatSearchOpen(false);
+    setChatSearchQ("");
+    setChatSearchHits([]);
+    setChatSearchNextCursor(null);
+    setChatSearchErr(null);
+
+    await loadFirstPage(conv.id);
+
+    // tenta achar a msg — se não tiver, vai carregando páginas antigas até achar
+    await ensureMessageLoaded(conv.id, hit.id);
   }
 
   // ====== SOCKET: realtime no chat aberto ======
   useEffect(() => {
-    // só conecta quando está vendo conversa
     if (mode !== "conversation") return;
     if (!token) return;
     if (!selectedConv?.id) return;
@@ -293,11 +497,6 @@ export function AdminHistoryPage() {
 
       setMessages((prev) => {
         if (prev.some((m) => m.id === msg.id)) return prev;
-
-        // se houver busca aplicada, você escolhe:
-        // A) WhatsApp-like: mostra mesmo assim
-        // B) "certinho": só adiciona se bater na busca
-        // Vou manter WhatsApp-like (mais útil).
         return [...prev, msg];
       });
 
@@ -311,8 +510,6 @@ export function AdminHistoryPage() {
       });
     });
 
-    s.on("disconnect", () => {});
-
     return () => {
       try {
         s.disconnect();
@@ -321,25 +518,91 @@ export function AdminHistoryPage() {
     };
   }, [mode, token, selectedConv?.id]);
 
-  // ====== quando aplica busca dentro do chat ======
+  // ====== Busca WhatsApp-like (painel lateral) ======
+  async function runChatSearch(firstPage = true) {
+    if (!selectedConv?.id) return;
+
+    const q = chatSearchQ.trim();
+    if (q.length < 1) {
+      setChatSearchErr("Digite pelo menos 1 caractere.");
+      setChatSearchHits([]);
+      setChatSearchNextCursor(null);
+      return;
+    }
+
+    setChatSearchLoading(true);
+    setChatSearchErr(null);
+
+    try {
+      const data = await fetchMessagesPage({
+        conversationId: selectedConv.id,
+        take: 80,
+        cursor: firstPage ? null : chatSearchNextCursor,
+        q,
+      });
+
+      const items = data.items ?? [];
+      setChatSearchHits((prev) => (firstPage ? items : [...prev, ...items]));
+      setChatSearchNextCursor(data.nextCursor ?? null);
+    } catch (e: any) {
+      if (e?.response?.status === 401) return logout();
+      setChatSearchErr(e?.response?.data?.message ?? "Falha ao buscar na conversa");
+      setChatSearchHits([]);
+      setChatSearchNextCursor(null);
+    } finally {
+      setChatSearchLoading(false);
+    }
+  }
+
   useEffect(() => {
     if (mode !== "conversation") return;
-    if (!selectedConv?.id) return;
-    loadFirstPage(selectedConv.id, inChatApplied);
+    if (!chatSearchOpen) return;
+
+    const t = setTimeout(() => {
+      runChatSearch(true);
+    }, 250);
+
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inChatApplied]);
+  }, [chatSearchQ, chatSearchOpen, mode, selectedConv?.id]);
+
+  async function jumpToChatHit(m: Message) {
+    if (!selectedConv?.id) return;
+
+    setHighlightTerm(chatSearchQ.trim());
+    setPendingScrollToId(m.id);
+
+    await ensureMessageLoaded(selectedConv.id, m.id);
+  }
 
   // ====== UI ======
   const headerSubtitle = useMemo(() => {
     if (mode === "contacts") return "Históricos • contatos e busca global";
-    if (mode === "userConversations") return selectedUser ? `Históricos • chats de ${selectedUser.name}` : "Históricos • chats do usuário";
+    if (mode === "userConversations")
+      return selectedUser ? `Históricos • chats de ${selectedUser.name}` : "Históricos • chats do usuário";
     if (mode === "conversation") {
-      const u = selectedUser?.name ?? "Usuário";
+      const u = selectedConv?.otherUser?.name ? (selectedUser?.name ?? "Usuário") : "Usuário";
       const other = selectedConv?.otherUser?.name ?? "Contato";
       return `Históricos • ${u} ↔ ${other}`;
     }
     return "Históricos";
   }, [mode, selectedUser, selectedConv]);
+
+  const groupedMessages = useMemo(() => {
+    // Agrupa com separador de data (WhatsApp-like)
+    const out: Array<{ kind: "sep"; label: string } | { kind: "msg"; m: Message }> = [];
+    let lastLabel = "";
+
+    for (const m of messages) {
+      const lbl = dateLabel(m.createdAt);
+      if (lbl !== lastLabel) {
+        out.push({ kind: "sep", label: lbl });
+        lastLabel = lbl;
+      }
+      out.push({ kind: "msg", m });
+    }
+    return out;
+  }, [messages]);
 
   return (
     <div style={{ width: "min(1100px, 100%)", margin: "0 auto", padding: "18px 16px 56px" }}>
@@ -353,7 +616,7 @@ export function AdminHistoryPage() {
               <input
                 value={globalQ}
                 onChange={(e) => setGlobalQ(e.target.value)}
-                placeholder='Ex: "salário"'
+                placeholder='Ex: "impressora"'
                 style={inputStyle({ flex: 1, minWidth: 260 })}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") runGlobalSearch();
@@ -362,8 +625,8 @@ export function AdminHistoryPage() {
 
               <button
                 onClick={runGlobalSearch}
-                disabled={globalLoading || globalQ.trim().length < 2}
-                style={primaryBtn(globalLoading || globalQ.trim().length < 2)}
+                disabled={globalLoading || globalQ.trim().length < 1}
+                style={primaryBtn(globalLoading || globalQ.trim().length < 1)}
               >
                 {globalLoading ? "Buscando..." : "Buscar"}
               </button>
@@ -384,12 +647,50 @@ export function AdminHistoryPage() {
                         borderRadius: 16,
                         border: "1px solid var(--border)",
                         background: "rgba(255,255,255,0.02)",
+                        display: "grid",
+                        gap: 10,
                       }}
                     >
-                      <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                        {a.name} ↔ {b.name} • {fmt(h.createdAt)} • por {h.sender.name}
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: "var(--muted)",
+                          display: "flex",
+                          gap: 10,
+                          flexWrap: "wrap",
+                          alignItems: "center",
+                        }}
+                      >
+                        <span>
+                          {a.name} ↔ {b.name}
+                        </span>
+                        <span>•</span>
+                        <span>{fmt(h.createdAt)}</span>
+                        <span>•</span>
+                        <span>por {h.sender.name}</span>
                       </div>
-                      <div style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>{h.bodyPreview}</div>
+
+                      <div style={{ whiteSpace: "pre-wrap", fontSize: 14, lineHeight: 1.35 }}>
+                        <HighlightText text={h.bodyPreview} query={globalQ.trim()} />
+                      </div>
+
+                      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                        <button
+                          onClick={() => openFromGlobal(h)}
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: 12,
+                            border: "1px solid var(--border)",
+                            background: "transparent",
+                            color: "var(--fg)",
+                            cursor: "pointer",
+                            fontWeight: 900,
+                          }}
+                          title="Abrir a conversa completa e ir até esta mensagem"
+                        >
+                          Ver conversa completa
+                        </button>
+                      </div>
                     </div>
                   );
                 })}
@@ -538,8 +839,15 @@ export function AdminHistoryPage() {
                     setMessages([]);
                     setNextCursor(null);
                     setHasMore(true);
-                    setInChatApplied("");
-                    setInChatSearch("");
+
+                    setChatSearchOpen(false);
+                    setChatSearchQ("");
+                    setChatSearchHits([]);
+                    setChatSearchNextCursor(null);
+                    setChatSearchErr(null);
+
+                    setHighlightTerm("");
+                    setPendingScrollToId(null);
                   }}
                   style={ghostBtn(false)}
                 >
@@ -548,99 +856,247 @@ export function AdminHistoryPage() {
 
                 <button
                   onClick={() => {
-                    if (selectedConv?.id) loadFirstPage(selectedConv.id, inChatApplied);
+                    if (selectedConv?.id) loadFirstPage(selectedConv.id);
                   }}
                   style={ghostBtn(chatLoading)}
                   title="Recarregar"
                 >
                   {chatLoading ? "Carregando..." : "Atualizar"}
                 </button>
+
+                {/* WhatsApp-like: lupa abre painel */}
+                <button
+                  onClick={() => setChatSearchOpen((v) => !v)}
+                  style={ghostBtn(false)}
+                  title="Pesquisar mensagens"
+                >
+                  🔍
+                </button>
               </div>
             }
           >
-            {/* Busca dentro */}
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
-              <input
-                value={inChatSearch}
-                onChange={(e) => setInChatSearch(e.target.value)}
-                placeholder='Buscar dentro da conversa (ex: "sorte")'
-                style={inputStyle({ flex: 1, minWidth: 260 })}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") setInChatApplied(inChatSearch.trim());
-                }}
-              />
-
-              <button onClick={() => setInChatApplied(inChatSearch.trim())} style={primaryBtn(false)}>
-                Buscar
-              </button>
-
-              {inChatApplied.trim() ? (
-                <button
-                  onClick={() => {
-                    setInChatSearch("");
-                    setInChatApplied("");
-                  }}
-                  style={ghostBtn(false)}
-                  title="Limpar busca"
-                >
-                  Limpar
-                </button>
-              ) : null}
-            </div>
-
             {chatMsg ? <div style={{ marginBottom: 10, color: "#ff8a8a", fontSize: 13 }}>{chatMsg}</div> : null}
 
-            {/* Chat */}
-            <div
-              ref={listRef}
-              onScroll={() => {
-                const el = listRef.current;
-                if (!el) return;
-                if (el.scrollTop < 120 && selectedConv?.id) loadMoreTop(selectedConv.id);
-              }}
-              style={{
-                height: "min(70vh, 720px)",
-                overflow: "auto",
-                padding: 12,
-                borderRadius: 18,
-                border: "1px solid var(--border)",
-                background: "rgba(0,0,0,0.06)",
-              }}
-            >
-              {hasMore ? (
-                <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 12, padding: "6px 0 12px" }}>
-                  {chatLoading ? "Carregando…" : "Role pra cima para carregar mais"}
-                </div>
-              ) : (
-                <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 12, padding: "6px 0 12px" }}>
-                  Início da conversa
-                </div>
-              )}
+            <div className={chatSearchOpen ? "bhash-chatGrid bhash-chatGrid--withSearch" : "bhash-chatGrid"}>
+              {/* Chat */}
+              <div
+                ref={listRef}
+                onScroll={() => {
+                  const el = listRef.current;
+                  if (!el) return;
+                  if (el.scrollTop < 120 && selectedConv?.id) loadMoreTop(selectedConv.id);
+                }}
+                className="wa-chat"
+              >
+                {hasMore ? (
+                  <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 12, padding: "6px 0 12px" }}>
+                    {chatLoading ? "Carregando…" : "Role pra cima para carregar mais"}
+                  </div>
+                ) : (
+                  <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 12, padding: "6px 0 12px" }}>
+                    Início da conversa
+                  </div>
+                )}
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {messages.map((m) => (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {groupedMessages.map((row, idx) => {
+                    if (row.kind === "sep") {
+                      return (
+                        <div key={`sep-${row.label}-${idx}`} className="bhash-date-sep">
+                          {row.label}
+                        </div>
+                      );
+                    }
+
+                    const m = row.m;
+                    const isMe = selectedUser?.id ? m.senderId === selectedUser.id : false;
+
+                    const time = (() => {
+                      try {
+                        const dt = new Date(m.createdAt);
+                        return dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                      } catch {
+                        return "";
+                      }
+                    })();
+
+                    return (
+                      <div
+                        key={m.id}
+                        data-mid={m.id}
+                        style={{
+                          display: "flex",
+                          justifyContent: isMe ? "flex-end" : "flex-start",
+                        }}
+                      >
+                        <div
+                          className={`bhash-bubble ${isMe ? "bhash-bubble--me" : "bhash-bubble--other"}`}
+                          style={{
+                            maxWidth: 520,
+                            padding: "8px 10px",
+                            borderRadius: 12,
+                            border: "1px solid var(--border)",
+                            boxShadow: "var(--shadow)",
+                            position: "relative",
+                          }}
+                        >
+                          {/* corpo */}
+                          <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.35, paddingRight: 54 }}>
+                            {highlightTerm.trim() ? (
+                              <HighlightText text={m.body} query={highlightTerm.trim()} />
+                            ) : (
+                              m.body
+                            )}
+                          </div>
+
+                          {/* hora no cantinho (sempre separada do texto) */}
+                          <div className="bhash-time">{time}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {messages.length === 0 && !chatLoading ? (
+                    <div style={{ color: "var(--muted)" }}>Nenhuma mensagem encontrada.</div>
+                  ) : null}
+                </div>
+              </div>
+
+              {/* Painel lateral de busca (WhatsApp-like) */}
+              {chatSearchOpen ? (
+                <div className="bhash-searchPanel">
                   <div
-                    key={m.id}
                     style={{
-                      maxWidth: 780,
-                      padding: 10,
-                      borderRadius: 14,
-                      border: "1px solid var(--border)",
-                      background: "var(--card-bg)",
-                      boxShadow: "var(--shadow)",
+                      padding: 12,
+                      borderBottom: "1px solid var(--border)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
                     }}
                   >
-                    <div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 800 }}>
-                      {m.sender.name} • {fmt(m.createdAt)}
-                    </div>
-                    <div style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>{m.body}</div>
+                    <div style={{ fontWeight: 900, color: "var(--fg)" }}>Pesquisar mensagens</div>
+                    <button
+                      onClick={() => setChatSearchOpen(false)}
+                      style={{
+                        marginLeft: "auto",
+                        width: 40,
+                        height: 40,
+                        borderRadius: 12,
+                        border: "1px solid var(--border)",
+                        background: "transparent",
+                        color: "var(--fg)",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                      }}
+                      title="Fechar"
+                    >
+                      ×
+                    </button>
                   </div>
-                ))}
 
-                {messages.length === 0 && !chatLoading ? (
-                  <div style={{ color: "var(--muted)" }}>Nenhuma mensagem encontrada.</div>
-                ) : null}
-              </div>
+                  <div style={{ padding: 12, display: "grid", gap: 10 }}>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                      <input
+                        value={chatSearchQ}
+                        onChange={(e) => setChatSearchQ(e.target.value)}
+                        placeholder="Buscar…"
+                        style={inputStyle({ flex: 1 })}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") runChatSearch(true);
+                        }}
+                      />
+                      <button
+                        onClick={() => runChatSearch(true)}
+                        style={primaryBtn(false)}
+                        disabled={chatSearchLoading}
+                        title="Buscar"
+                      >
+                        {chatSearchLoading ? "..." : "Buscar"}
+                      </button>
+                    </div>
+
+                    {chatSearchErr ? <div style={{ color: "#ff8a8a", fontSize: 13 }}>{chatSearchErr}</div> : null}
+
+                    <div style={{ color: "var(--muted)", fontSize: 12 }}>
+                      {chatSearchQ.trim()
+                        ? `${chatSearchHits.length} resultado(s)`
+                        : "Digite um termo para ver as ocorrências nesta conversa."}
+                    </div>
+                  </div>
+
+                  <div className="bhash-searchPanel__list">
+                    <div className="bhash-searchPanel__listInner">
+                      {chatSearchQ.trim() && chatSearchHits.length === 0 && !chatSearchLoading ? (
+                        <div style={{ color: "var(--muted)" }}>Nenhuma ocorrência.</div>
+                      ) : null}
+
+                      {chatSearchHits.map((m) => {
+                        const time = (() => {
+                          try {
+                            const dt = new Date(m.createdAt);
+                            return dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                          } catch {
+                            return "";
+                          }
+                        })();
+
+                        return (
+                          <button
+                            key={m.id}
+                            onClick={() => jumpToChatHit(m)}
+                            style={{
+                              textAlign: "left",
+                              padding: 12,
+                              borderRadius: 14,
+                              border: "1px solid var(--border)",
+                              background: "rgba(255,255,255,0.03)",
+                              cursor: "pointer",
+                              color: "var(--fg)",
+                              width: "100%",
+                            }}
+                            title="Ir para esta mensagem"
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                gap: 10,
+                                alignItems: "center",
+                              }}
+                            >
+                              <div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 900 }}>{time}</div>
+                              <div style={{ fontSize: 12, color: "var(--muted)" }}>{dateLabel(m.createdAt)}</div>
+                            </div>
+
+                            <div style={{ marginTop: 6, fontSize: 14, lineHeight: 1.35, whiteSpace: "pre-wrap" }}>
+                              <HighlightText text={m.body} query={chatSearchQ.trim()} />
+                            </div>
+                          </button>
+                        );
+                      })}
+
+                      {chatSearchNextCursor ? (
+                        <button
+                          onClick={() => runChatSearch(false)}
+                          disabled={chatSearchLoading}
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: 12,
+                            border: "1px solid var(--border)",
+                            background: "transparent",
+                            color: "var(--fg)",
+                            cursor: chatSearchLoading ? "not-allowed" : "pointer",
+                            fontWeight: 900,
+                            opacity: chatSearchLoading ? 0.7 : 1,
+                          }}
+                        >
+                          {chatSearchLoading ? "Carregando..." : "Carregar mais"}
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 12 }}>
@@ -721,12 +1177,4 @@ function ghostBtn(disabled: boolean): React.CSSProperties {
     fontWeight: 900,
     opacity: disabled ? 0.7 : 1,
   };
-}
-
-function fmt(d: string) {
-  try {
-    return new Date(d).toLocaleString();
-  } catch {
-    return d;
-  }
 }

@@ -1,3 +1,4 @@
+// C:\dev\bhash\backend\src\admin-history\admin-history.controller.ts
 import {
   Controller,
   Get,
@@ -53,6 +54,30 @@ export class AdminHistoryController {
       to,
       q,
     });
+  }
+
+  // ✅ NOVO: busca estilo WhatsApp dentro da conversa (lista ocorrências)
+  @Get('conversations/:id/search')
+  searchInConversation(
+    @Param('id') conversationId: string,
+    @Query('q') q?: string,
+    @Query('take') take?: string,
+  ) {
+    if (!conversationId) throw new BadRequestException('conversationId inválido');
+    return this.svc.searchInConversation({ conversationId, q, take });
+  }
+
+  // ✅ NOVO: abre conversa completa e já traz contexto em torno da msg âncora
+  @Get('conversations/:id/messages/around')
+  messagesAround(
+    @Param('id') conversationId: string,
+    @Query('messageId') messageId?: string,
+    @Query('take') take?: string,
+  ) {
+    if (!conversationId) throw new BadRequestException('conversationId inválido');
+    if (!messageId) throw new BadRequestException('messageId obrigatório');
+
+    return this.svc.messagesAround({ conversationId, messageId, take });
   }
 
   // D) busca global (todas as conversas)

@@ -1,3 +1,4 @@
+// C:\dev\bhash\backend\src\users\users.service.ts
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import * as argon2 from 'argon2';
@@ -33,9 +34,13 @@ export class UsersService {
     return user;
   }
 
-  async listActive() {
+  // ✅ NOVO: lista ativos excluindo o próprio usuário
+  async listActiveExcluding(myId: string) {
+    const id = (myId ?? '').trim();
+    if (!id) throw new BadRequestException('myId inválido');
+
     return this.prisma.user.findMany({
-      where: { isActive: true },
+      where: { isActive: true, NOT: { id } },
       orderBy: { name: 'asc' },
       select: { id: true, username: true, name: true, isActive: true },
     });

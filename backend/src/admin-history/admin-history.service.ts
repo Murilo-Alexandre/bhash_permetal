@@ -30,6 +30,9 @@ type AdminConvRow = {
 export class AdminHistoryService {
   constructor(private readonly prisma: PrismaService) {}
 
+  // =========================
+  // A) CONTATOS (usuários do chat)
+  // =========================
   async listContacts(input: {
     q?: string;
     companyId?: string;
@@ -84,11 +87,13 @@ export class AdminHistoryService {
     return { ok: true, page, pageSize, total, items };
   }
 
+  // =========================
+  // B) CONVERSAS do usuário selecionado
+  // =========================
   async listUserConversations(userId: string) {
     const u = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
     if (!u) throw new BadRequestException('Usuário não encontrado');
 
-    // ✅ Força o tipo correto (resolve TS2339 no c.userA.id)
     const convs = (await this.prisma.conversation.findMany({
       where: { OR: [{ userAId: userId }, { userBId: userId }] },
       orderBy: { updatedAt: 'desc' },
@@ -127,6 +132,9 @@ export class AdminHistoryService {
     return { ok: true, items };
   }
 
+  // =========================
+  // C) MENSAGENS da conversa (scroll/cursor + busca simples)
+  // =========================
   async listConversationMessages(input: {
     conversationId: string;
     cursor?: string;
@@ -166,6 +174,119 @@ export class AdminHistoryService {
     return { ok: true, items: messages.reverse(), nextCursor };
   }
 
+  // =========================
+  // ✅ NOVO: Busca WhatsApp-style (lista de ocorrências) dentro de 1 conversa
+  // =========================
+  async searchInConversation(input: {
+    conversationId: string;
+    q?: string;
+    take?: string;
+  }) {
+    const q = norm(input.q);
+    if (!q || q.length < 1) throw new BadRequestException('Informe 1 caractere ou mais');
+
+    const takeN = Math.min(Math.max(parseInt(input.take ?? '200', 10) || 200, 1), 500);
+
+    const rows = await this.prisma.message.findMany({
+      where: {
+        conversationId: input.conversationId,
+        body: { contains: q, mode: 'insensitive' },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: takeN,
+      select: {
+        id: true,
+        createdAt: true,
+        body: true,
+        senderId: true,
+      },
+    });
+
+    return {
+      ok: true,
+      q,
+      total: rows.length,
+      items: rows.map((m) => ({
+        messageId: m.id,
+        createdAt: m.createdAt,
+        senderId: m.senderId,
+        bodyPreview: (m.body ?? '').slice(0, 220),
+      })),
+    };
+  }
+
+  // =========================
+  // ✅ NOVO: Mensagens ao redor de uma mensagem (para clicar e scrollar + destacar)
+  // Admin pode ver tudo
+  // =========================
+  async messagesAround(input: {
+    conversationId: string;
+    messageId: string;
+    take?: string;
+  }) {
+    const conversationId = norm(input.conversationId);
+    const messageId = norm(input.messageId);
+    if (!conversationId) throw new BadRequestException('conversationId inválido');
+    if (!messageId) throw new BadRequestException('messageId inválido');
+
+    const takeN = Math.min(Math.max(parseInt(input.take ?? '60', 10) || 60, 3), 200);
+    const half = Math.floor((takeN - 1) / 2);
+
+    const anchor = await this.prisma.message.findUnique({
+      where: { id: messageId },
+      select: { id: true, conversationId: true, createdAt: true },
+    });
+
+    if (!anchor || anchor.conversationId !== conversationId) {
+      throw new BadRequestException('Mensagem âncora não encontrada nesta conversa');
+    }
+
+    // antes (mais antigos -> vamos buscar DESC e depois inverter)
+    const before = await this.prisma.message.findMany({
+      where: {
+        conversationId,
+        OR: [
+          { createdAt: { lt: anchor.createdAt } },
+          {
+            AND: [{ createdAt: { equals: anchor.createdAt } }, { id: { lt: anchor.id } }],
+          },
+        ],
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: half,
+      include: { sender: { select: { id: true, username: true, name: true } } },
+    });
+
+    const after = await this.prisma.message.findMany({
+      where: {
+        conversationId,
+        OR: [
+          { createdAt: { gt: anchor.createdAt } },
+          {
+            AND: [{ createdAt: { equals: anchor.createdAt } }, { id: { gt: anchor.id } }],
+          },
+        ],
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: takeN - 1 - before.length,
+      include: { sender: { select: { id: true, username: true, name: true } } },
+    });
+
+    const anchorFull = await this.prisma.message.findUnique({
+      where: { id: anchor.id },
+      include: { sender: { select: { id: true, username: true, name: true } } },
+    });
+
+    return {
+      ok: true,
+      anchorId: anchor.id,
+      items: [...before.reverse(), anchorFull, ...after],
+    };
+  }
+
+  // =========================
+  // D) BUSCA GLOBAL (todas as conversas)
+  // =========================
   async globalSearch(input: {
     q?: string;
     from?: string;
@@ -176,7 +297,9 @@ export class AdminHistoryService {
     pageSizeStr?: string;
   }) {
     const q = norm(input.q);
-    if (!q || q.length < 2) throw new BadRequestException('Informe uma palavra/frase (mín. 2 caracteres)');
+
+    // ✅ AGORA aceita 1 caractere
+    if (!q || q.length < 1) throw new BadRequestException('Informe 1 caractere ou mais');
 
     const page = Math.max(1, Number(input.pageStr ?? 1) || 1);
     const pageSize = Math.min(100, Math.max(10, Number(input.pageSizeStr ?? 50) || 50));
@@ -210,7 +333,7 @@ export class AdminHistoryService {
       this.prisma.message.count({ where }),
       this.prisma.message.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip,
         take: pageSize,
         select: {

@@ -120,10 +120,6 @@ export default function App() {
               Empresas/Setores
             </button>
 
-            <button onClick={() => setPage("audit")} style={tabBtn(page === "audit")}>
-              Auditoria
-            </button>
-
             <button onClick={() => setPage("history")} style={tabBtn(page === "history")}>
               Históricos
             </button>

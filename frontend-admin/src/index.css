@@ -1,3 +1,4 @@
+/* C:\dev\bhash\frontend-admin\src\index.css */
 :root{
   --bhash-primary: #001f3f;
 
@@ -107,3 +108,134 @@ body{
 .toggle--dark .toggle__icon--right{ opacity: 0.92; }
 
 
+/* ==========================================================================
+   WhatsApp-like chat (Admin History)
+   ========================================================================== */
+
+.wa-chat{
+  height: min(70vh, 720px);
+  overflow: auto;
+  padding: 12px 10px 14px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background:
+    radial-gradient(1200px 600px at 20% 0%, rgba(255,255,255,0.05), transparent 60%),
+    rgba(0,0,0,0.06);
+}
+
+[data-theme="dark"] .wa-chat{
+  background:
+    radial-gradient(1200px 600px at 20% 0%, rgba(255,255,255,0.035), transparent 60%),
+    rgba(0,0,0,0.28);
+}
+
+/* ===== BHASH: highlight estilo "marca texto" ===== */
+.bhash-hl{
+  background: #ffeb3b;
+  color: #111;
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+/* ===== BHASH: separador de data (faixa) ===== */
+.bhash-date-sep{
+  align-self: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
+  color: #ffffff;
+  background: color-mix(in srgb, var(--bhash-primary) 40%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bhash-primary) 60%, transparent);
+  user-select: none;
+  box-shadow: var(--shadow);
+}
+
+/* ===== BHASH: bubbles ===== */
+.bhash-bubble{
+  background: rgba(255,255,255,0.06);
+  color: var(--fg);
+}
+
+.bhash-bubble--me{
+  background: var(--bhash-primary);
+  color: #ffffff; /* ✅ texto branco no light */
+}
+
+.bhash-bubble--other{
+  background: rgba(255,255,255,0.06);
+  color: var(--fg);
+}
+
+/* Hora dentro da bolha */
+.bhash-time{
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  font-size: 11px;
+  font-weight: 800;
+  opacity: 0.85;
+  user-select: none;
+  pointer-events: none;
+}
+
+/* hora no "me" sempre branca */
+.bhash-bubble--me .bhash-time{
+  color: rgba(255,255,255,0.82);
+}
+
+/* hora no "other" segue tema */
+.bhash-bubble--other .bhash-time{
+  color: var(--muted);
+}
+
+/* ===== BHASH: flash ao ir para msg ===== */
+.bhash-msg-flash{
+  outline: 2px solid rgba(255,235,59,0.9);
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+
+/* ===== Layout do chat + painel de busca (fixo e estável) ===== */
+.bhash-chatGrid{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.bhash-chatGrid--withSearch{
+  grid-template-columns: minmax(0, 1fr) 380px;
+}
+
+@media (max-width: 980px){
+  .bhash-chatGrid--withSearch{
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Painel lateral: mesma altura do chat e scroll interno */
+.bhash-searchPanel{
+  height: min(70vh, 720px); /* ✅ igual ao chat */
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: rgba(0,0,0,0.10);
+  overflow: hidden;
+
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* scroll somente na lista */
+.bhash-searchPanel__list{
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}
+
+.bhash-searchPanel__listInner{
+  display: grid;
+  gap: 10px;
+  align-content: start; /* ✅ evita “card gigante” com 1 item */
+}
