@@ -7,7 +7,6 @@ import { AdminDashboard } from "./pages/AdminDashboard";
 import { AdminAppConfigPage } from "./pages/AdminAppConfigPage";
 import { AdminFirstLoginPage } from "./pages/AdminFirstLoginPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
-import { AdminAuditPage } from "./pages/AdminAuditPage";
 import { AdminOrgPage } from "./pages/AdminOrgPage";
 import { AdminHistoryPage } from "./pages/AdminHistoryPage";
 
@@ -153,9 +152,7 @@ export default function App() {
           <AdminOrgPage />
         ) : page === "history" ? (
           <AdminHistoryPage />
-        ) : (
-          <AdminAuditPage />
-        )}
+        ) : null}
       </div>
     </div>
   );

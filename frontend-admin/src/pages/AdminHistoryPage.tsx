@@ -70,6 +70,8 @@ type GlobalHit = {
 
 type ViewMode = "contacts" | "userConversations" | "conversation";
 
+type SearchMode = "normal" | "exact";
+
 /** ============================
  *  Utils
  *  ============================ */
@@ -104,6 +106,31 @@ function escapeRegExp(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function normalizeText(s: string) {
+  // remove acento + lowercase
+  return (s ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function matchText(text: string, qRaw: string, mode: SearchMode) {
+  const q = normalizeText(qRaw.trim());
+  if (!q) return true;
+
+  const t = normalizeText(text);
+
+  if (mode === "normal") {
+    // substring
+    return t.includes(q);
+  }
+
+  // exact: palavra inteira (token match), ignorando acento/caixa
+  // Ex: q="sala" => casa com "sala" mas NÃO com "salario" nem "salada"
+  const tokens = t.split(/[^\p{L}\p{N}_]+/gu).filter(Boolean);
+  return tokens.includes(q);
+}
+
 function HighlightText({
   text,
   query,
@@ -132,8 +159,55 @@ function HighlightText({
   }
 
   if (last < text.length) parts.push(text.slice(last));
-
   return <span className={className}>{parts}</span>;
+}
+
+function SearchIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        d="M10.5 3a7.5 7.5 0 105.09 13.02l3.2 3.2a1 1 0 001.42-1.42l-3.2-3.2A7.5 7.5 0 0010.5 3zm0 2a5.5 5.5 0 110 11 5.5 5.5 0 010-11z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+function ModeToggle({
+  value,
+  onChange,
+  small,
+}: {
+  value: SearchMode;
+  onChange: (v: SearchMode) => void;
+  small?: boolean;
+}) {
+  return (
+    <div className={`bhash-modeToggle ${small ? "bhash-modeToggle--sm" : ""}`} role="group" aria-label="Modo de busca">
+      <button
+        type="button"
+        className={`bhash-modeToggle__btn ${value === "normal" ? "is-active" : ""}`}
+        onClick={() => onChange("normal")}
+        title="Busca normal (contém)"
+      >
+        Normal
+      </button>
+      <button
+        type="button"
+        className={`bhash-modeToggle__btn ${value === "exact" ? "is-active" : ""}`}
+        onClick={() => onChange("exact")}
+        title="Busca exata (palavra inteira)"
+      >
+        Exata
+      </button>
+    </div>
+  );
 }
 
 /** ============================
@@ -156,6 +230,7 @@ export function AdminHistoryPage() {
 
   // ====== BUSCA GLOBAL ======
   const [globalQ, setGlobalQ] = useState("");
+  const [globalMode, setGlobalMode] = useState<SearchMode>("normal");
   const [globalLoading, setGlobalLoading] = useState(false);
   const [globalErr, setGlobalErr] = useState<string | null>(null);
   const [globalHits, setGlobalHits] = useState<GlobalHit[]>([]);
@@ -177,6 +252,7 @@ export function AdminHistoryPage() {
   // ====== Busca WhatsApp-like dentro do chat ======
   const [chatSearchOpen, setChatSearchOpen] = useState(false);
   const [chatSearchQ, setChatSearchQ] = useState("");
+  const [chatSearchMode, setChatSearchMode] = useState<SearchMode>("normal");
   const [chatSearchLoading, setChatSearchLoading] = useState(false);
   const [chatSearchErr, setChatSearchErr] = useState<string | null>(null);
   const [chatSearchHits, setChatSearchHits] = useState<Message[]>([]);
@@ -184,7 +260,7 @@ export function AdminHistoryPage() {
 
   // ====== “scroll pra mensagem” e destaque persistente ======
   const [pendingScrollToId, setPendingScrollToId] = useState<string | null>(null);
-  const [highlightTerm, setHighlightTerm] = useState<string>(""); // termo a realçar dentro do chat
+  const [highlightTerm, setHighlightTerm] = useState<string>("");
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -235,17 +311,19 @@ export function AdminHistoryPage() {
     );
   }, [contacts, contactsQ]);
 
-  // ====== BUSCA GLOBAL ======
-  async function runGlobalSearch() {
-    const q = globalQ.trim();
-    if (q.length < 1) {
-      setGlobalErr("Digite pelo menos 1 caractere.");
+  // ====== BUSCA GLOBAL (API + filtro local por modo/acento/caixa) ======
+  async function runGlobalSearch(qRaw: string) {
+    const q = qRaw.trim();
+    if (!q) {
+      setGlobalErr(null);
       setGlobalHits([]);
+      setGlobalLoading(false);
       return;
     }
 
     setGlobalLoading(true);
     setGlobalErr(null);
+
     try {
       const res = await api.get<{ ok: boolean; items: GlobalHit[] }>(
         "/admin/history/search",
@@ -259,7 +337,11 @@ export function AdminHistoryPage() {
           },
         }
       );
-      setGlobalHits(res.data.items ?? []);
+
+      const items = res.data.items ?? [];
+      // modo "exact" aqui é aplicado no client para garantir a regra
+      const filtered = items.filter((h) => matchText(h.bodyPreview ?? "", q, globalMode));
+      setGlobalHits(filtered);
     } catch (e: any) {
       if (e?.response?.status === 401) return logout();
       setGlobalErr(e?.response?.data?.message ?? "Falha na busca global");
@@ -268,6 +350,26 @@ export function AdminHistoryPage() {
       setGlobalLoading(false);
     }
   }
+
+  // ✅ realtime: ao digitar, busca; ao limpar, some
+  useEffect(() => {
+    if (mode !== "contacts") return;
+
+    const q = globalQ.trim();
+    if (!q) {
+      setGlobalErr(null);
+      setGlobalHits([]);
+      setGlobalLoading(false);
+      return;
+    }
+
+    const t = setTimeout(() => {
+      runGlobalSearch(globalQ);
+    }, 250);
+
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [globalQ, globalMode, mode, companyId, departmentId]);
 
   // ====== LOAD CONVERSAS DO USER ======
   async function openUser(u: Contact) {
@@ -311,27 +413,38 @@ export function AdminHistoryPage() {
     return res.data;
   }
 
-  async function loadFirstPage(conversationId: string) {
+  async function loadFirstPage(
+    conversationId: string,
+    opts?: { scrollToBottom?: boolean }
+  ): Promise<{ items: Message[]; nextCursor: string | null }> {
+    const scrollToBottom = opts?.scrollToBottom ?? true;
+
     setChatLoading(true);
     setChatMsg(null);
+
     try {
       const data = await fetchMessagesPage({ conversationId, take: 60 });
-
       const items = data.items ?? [];
+      const nc = data.nextCursor ?? null;
+
       setMessages(items);
-      setNextCursor(data.nextCursor ?? null);
-      setHasMore(!!data.nextCursor);
+      setNextCursor(nc);
+      setHasMore(!!nc);
 
       requestAnimationFrame(() => {
         const el = listRef.current;
-        if (el) el.scrollTop = el.scrollHeight; // vai pro fim
+        if (!el) return;
+        if (scrollToBottom) el.scrollTop = el.scrollHeight;
       });
+
+      return { items, nextCursor: nc };
     } catch (e: any) {
-      if (e?.response?.status === 401) return logout();
+      if (e?.response?.status === 401) return logout() as any;
       setChatMsg(e?.response?.data?.message ?? "Falha ao carregar mensagens");
       setMessages([]);
       setNextCursor(null);
       setHasMore(false);
+      return { items: [], nextCursor: null };
     } finally {
       setChatLoading(false);
     }
@@ -382,19 +495,21 @@ export function AdminHistoryPage() {
       row.scrollIntoView({ block: "center", behavior: "smooth" });
       row.classList.add("bhash-msg-flash");
       window.setTimeout(() => row.classList.remove("bhash-msg-flash"), 1100);
-      return;
     }
   }
 
-  async function ensureMessageLoaded(conversationId: string, messageId: string) {
-    // tenta no que já carregou
-    if (messages.some((m) => m.id === messageId)) {
+  async function ensureMessageLoaded(
+    conversationId: string,
+    messageId: string,
+    opts?: { initialItems?: Message[]; initialCursor?: string | null }
+  ) {
+    const already = (opts?.initialItems ?? messages).some((m) => m.id === messageId);
+    if (already) {
       requestAnimationFrame(() => scrollToMessageId(messageId));
       return;
     }
 
-    // carrega páginas mais antigas até achar (limite de segurança)
-    let cursor = nextCursor;
+    let cursor = opts?.initialCursor ?? nextCursor;
     let guard = 0;
 
     setChatLoading(true);
@@ -415,9 +530,7 @@ export function AdminHistoryPage() {
         setNextCursor(cursor);
         setHasMore(!!cursor);
 
-        // checa se veio
         if (newItems.some((m) => m.id === messageId)) {
-          // espera render
           await new Promise((r) => requestAnimationFrame(() => r(null)));
           scrollToMessageId(messageId);
           return;
@@ -441,7 +554,7 @@ export function AdminHistoryPage() {
     setHighlightTerm("");
     setPendingScrollToId(null);
 
-    await loadFirstPage(conv.id);
+    await loadFirstPage(conv.id, { scrollToBottom: true });
   }
 
   // ====== Abrir conversa via busca global ======
@@ -449,7 +562,6 @@ export function AdminHistoryPage() {
     const a = hit.conversation.userA;
     const b = hit.conversation.userB;
 
-    // cria um “selectedUser” fake só pra manter o header padrão (não afeta backend)
     const fakeSelectedUser: Contact = { id: a.id, username: a.username, name: a.name };
     setSelectedUser(fakeSelectedUser);
 
@@ -463,7 +575,6 @@ export function AdminHistoryPage() {
     setSelectedConv(conv);
     setMode("conversation");
 
-    // abre chat completo, mas com “meta” de rolar pra msg e realçar termo
     setHighlightTerm(globalQ.trim());
     setPendingScrollToId(hit.id);
 
@@ -473,10 +584,12 @@ export function AdminHistoryPage() {
     setChatSearchNextCursor(null);
     setChatSearchErr(null);
 
-    await loadFirstPage(conv.id);
+    const first = await loadFirstPage(conv.id, { scrollToBottom: false });
 
-    // tenta achar a msg — se não tiver, vai carregando páginas antigas até achar
-    await ensureMessageLoaded(conv.id, hit.id);
+    await ensureMessageLoaded(conv.id, hit.id, {
+      initialItems: first.items,
+      initialCursor: first.nextCursor,
+    });
   }
 
   // ====== SOCKET: realtime no chat aberto ======
@@ -523,10 +636,11 @@ export function AdminHistoryPage() {
     if (!selectedConv?.id) return;
 
     const q = chatSearchQ.trim();
-    if (q.length < 1) {
-      setChatSearchErr("Digite pelo menos 1 caractere.");
+    if (!q) {
+      setChatSearchErr(null);
       setChatSearchHits([]);
       setChatSearchNextCursor(null);
+      setChatSearchLoading(false);
       return;
     }
 
@@ -538,11 +652,13 @@ export function AdminHistoryPage() {
         conversationId: selectedConv.id,
         take: 80,
         cursor: firstPage ? null : chatSearchNextCursor,
-        q,
+        q, // backend faz "contains"; a regra exata/acentos/caixa garantimos no client
       });
 
       const items = data.items ?? [];
-      setChatSearchHits((prev) => (firstPage ? items : [...prev, ...items]));
+      const filtered = items.filter((m) => matchText(m.body ?? "", q, chatSearchMode));
+
+      setChatSearchHits((prev) => (firstPage ? filtered : [...prev, ...filtered]));
       setChatSearchNextCursor(data.nextCursor ?? null);
     } catch (e: any) {
       if (e?.response?.status === 401) return logout();
@@ -554,9 +670,19 @@ export function AdminHistoryPage() {
     }
   }
 
+  // ✅ realtime (já era), agora: limpar quando vazio + respeitar modo
   useEffect(() => {
     if (mode !== "conversation") return;
     if (!chatSearchOpen) return;
+
+    const q = chatSearchQ.trim();
+    if (!q) {
+      setChatSearchErr(null);
+      setChatSearchHits([]);
+      setChatSearchNextCursor(null);
+      setChatSearchLoading(false);
+      return;
+    }
 
     const t = setTimeout(() => {
       runChatSearch(true);
@@ -564,7 +690,7 @@ export function AdminHistoryPage() {
 
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatSearchQ, chatSearchOpen, mode, selectedConv?.id]);
+  }, [chatSearchQ, chatSearchOpen, mode, selectedConv?.id, chatSearchMode]);
 
   async function jumpToChatHit(m: Message) {
     if (!selectedConv?.id) return;
@@ -589,7 +715,6 @@ export function AdminHistoryPage() {
   }, [mode, selectedUser, selectedConv]);
 
   const groupedMessages = useMemo(() => {
-    // Agrupa com separador de data (WhatsApp-like)
     const out: Array<{ kind: "sep"; label: string } | { kind: "msg"; m: Message }> = [];
     let lastLabel = "";
 
@@ -604,6 +729,36 @@ export function AdminHistoryPage() {
     return out;
   }, [messages]);
 
+  // “scroll pra msg” (garantia extra)
+  useEffect(() => {
+    if (mode !== "conversation") return;
+    if (!pendingScrollToId) return;
+
+    let tries = 0;
+    const maxTries = 30;
+
+    const tick = () => {
+      tries++;
+
+      const el = listRef.current;
+      if (!el) return;
+
+      const row = el.querySelector(`[data-mid="${pendingScrollToId}"]`) as HTMLElement | null;
+      if (row) {
+        row.scrollIntoView({ block: "center", behavior: "smooth" });
+        row.classList.add("bhash-msg-flash");
+        window.setTimeout(() => row.classList.remove("bhash-msg-flash"), 1100);
+
+        setPendingScrollToId(null);
+        return;
+      }
+
+      if (tries < maxTries) requestAnimationFrame(tick);
+    };
+
+    requestAnimationFrame(tick);
+  }, [mode, pendingScrollToId, messages]);
+
   return (
     <div style={{ width: "min(1100px, 100%)", margin: "0 auto", padding: "18px 16px 56px" }}>
       <h1 style={{ margin: 0, marginBottom: 6 }}>Históricos</h1>
@@ -611,25 +766,16 @@ export function AdminHistoryPage() {
 
       {mode === "contacts" ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
-          <Card title="Buscar em tudo (Global)" colSpan={12}>
+          <Card title="Busca Global" colSpan={12}>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <input
                 value={globalQ}
                 onChange={(e) => setGlobalQ(e.target.value)}
-                placeholder='Ex: "impressora"'
+                placeholder='Pesquise uma palavra'
                 style={inputStyle({ flex: 1, minWidth: 260 })}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") runGlobalSearch();
-                }}
               />
 
-              <button
-                onClick={runGlobalSearch}
-                disabled={globalLoading || globalQ.trim().length < 1}
-                style={primaryBtn(globalLoading || globalQ.trim().length < 1)}
-              >
-                {globalLoading ? "Buscando..." : "Buscar"}
-              </button>
+              <ModeToggle value={globalMode} onChange={setGlobalMode} />
             </div>
 
             {globalErr ? <div style={{ marginTop: 10, color: "#ff8a8a", fontSize: 13 }}>{globalErr}</div> : null}
@@ -696,9 +842,18 @@ export function AdminHistoryPage() {
                 })}
               </div>
             ) : (
-              <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13 }}>
-                {globalLoading ? "Buscando..." : "—"}
-              </div>
+            <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13, lineHeight: 1.4 }}>
+              {globalQ.trim().length === 0 ? (
+                <>
+                  <strong>Normal:</strong> encontra palavras que contenham o termo. <strong> | <u>Pesquisa:</u> Casa → <u>Resultado:</u></strong> <strong>Casa</strong>, <strong>Casa</strong>mento, <strong>Casa</strong>rão...<br/>
+                  <strong>Exata:</strong> mostra apenas resultados exatamente iguais ao termo. <strong> | <u>Pesquisa:</u></strong> Casa <strong>→ <u>Resultado:</u></strong> <strong>Casa</strong>
+                </>
+              ) : globalLoading ? (
+                "Buscando..."
+              ) : (
+                "Nenhum resultado."
+              )}
+            </div>
             )}
           </Card>
 
@@ -825,7 +980,6 @@ export function AdminHistoryPage() {
           </Card>
         </div>
       ) : (
-        // mode === "conversation"
         <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
           <Card
             title={`${selectedUser?.name ?? "Usuário"} ↔ ${selectedConv?.otherUser?.name ?? "Contato"}`}
@@ -856,7 +1010,7 @@ export function AdminHistoryPage() {
 
                 <button
                   onClick={() => {
-                    if (selectedConv?.id) loadFirstPage(selectedConv.id);
+                    if (selectedConv?.id) loadFirstPage(selectedConv.id, { scrollToBottom: true });
                   }}
                   style={ghostBtn(chatLoading)}
                   title="Recarregar"
@@ -864,13 +1018,12 @@ export function AdminHistoryPage() {
                   {chatLoading ? "Carregando..." : "Atualizar"}
                 </button>
 
-                {/* WhatsApp-like: lupa abre painel */}
                 <button
                   onClick={() => setChatSearchOpen((v) => !v)}
-                  style={ghostBtn(false)}
+                  className="bhash-iconBtn"
                   title="Pesquisar mensagens"
                 >
-                  🔍
+                  <SearchIcon />
                 </button>
               </div>
             }
@@ -940,7 +1093,6 @@ export function AdminHistoryPage() {
                             position: "relative",
                           }}
                         >
-                          {/* corpo */}
                           <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.35, paddingRight: 54 }}>
                             {highlightTerm.trim() ? (
                               <HighlightText text={m.body} query={highlightTerm.trim()} />
@@ -949,7 +1101,6 @@ export function AdminHistoryPage() {
                             )}
                           </div>
 
-                          {/* hora no cantinho (sempre separada do texto) */}
                           <div className="bhash-time">{time}</div>
                         </div>
                       </div>
@@ -962,7 +1113,7 @@ export function AdminHistoryPage() {
                 </div>
               </div>
 
-              {/* Painel lateral de busca (WhatsApp-like) */}
+              {/* Painel lateral de busca */}
               {chatSearchOpen ? (
                 <div className="bhash-searchPanel">
                   <div
@@ -974,24 +1125,18 @@ export function AdminHistoryPage() {
                       gap: 10,
                     }}
                   >
-                    <div style={{ fontWeight: 900, color: "var(--fg)" }}>Pesquisar mensagens</div>
-                    <button
-                      onClick={() => setChatSearchOpen(false)}
-                      style={{
-                        marginLeft: "auto",
-                        width: 40,
-                        height: 40,
-                        borderRadius: 12,
-                        border: "1px solid var(--border)",
-                        background: "transparent",
-                        color: "var(--fg)",
-                        cursor: "pointer",
-                        fontWeight: 900,
-                      }}
-                      title="Fechar"
-                    >
-                      ×
-                    </button>
+                    <div style={{ fontWeight: 900, color: "var(--fg)" }}>Modo de Pesquisa:</div>
+
+                    <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
+                      <ModeToggle value={chatSearchMode} onChange={setChatSearchMode} small />
+                      <button
+                        onClick={() => setChatSearchOpen(false)}
+                        className="bhash-iconBtn"
+                        title="Fechar"
+                      >
+                        ×
+                      </button>
+                    </div>
                   </div>
 
                   <div style={{ padding: 12, display: "grid", gap: 10 }}>
@@ -1001,18 +1146,7 @@ export function AdminHistoryPage() {
                         onChange={(e) => setChatSearchQ(e.target.value)}
                         placeholder="Buscar…"
                         style={inputStyle({ flex: 1 })}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") runChatSearch(true);
-                        }}
                       />
-                      <button
-                        onClick={() => runChatSearch(true)}
-                        style={primaryBtn(false)}
-                        disabled={chatSearchLoading}
-                        title="Buscar"
-                      >
-                        {chatSearchLoading ? "..." : "Buscar"}
-                      </button>
                     </div>
 
                     {chatSearchErr ? <div style={{ color: "#ff8a8a", fontSize: 13 }}>{chatSearchErr}</div> : null}
@@ -1150,19 +1284,6 @@ function inputStyle(extra?: React.CSSProperties): React.CSSProperties {
     color: "var(--input-fg)",
     outline: "none",
     ...extra,
-  };
-}
-
-function primaryBtn(disabled: boolean): React.CSSProperties {
-  return {
-    padding: "12px 14px",
-    borderRadius: 12,
-    border: "1px solid var(--border)",
-    background: "var(--btn-bg)",
-    color: "var(--btn-fg)",
-    fontWeight: 900,
-    cursor: disabled ? "not-allowed" : "pointer",
-    opacity: disabled ? 0.7 : 1,
   };
 }
 
