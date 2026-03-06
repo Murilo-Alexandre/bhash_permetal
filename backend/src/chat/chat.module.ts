@@ -1,10 +1,12 @@
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import { ChatGateway } from './chat.gateway';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MessagesService } from '../messages/messages.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { ChatEventsService } from './chat-events.service';
 
+@Global()
 @Module({
   imports: [
     ConfigModule,
@@ -16,6 +18,7 @@ import { PrismaService } from '../prisma/prisma.service';
       }),
     }),
   ],
-  providers: [ChatGateway, MessagesService, PrismaService],
+  providers: [ChatGateway, ChatEventsService, MessagesService, PrismaService],
+  exports: [ChatEventsService],
 })
 export class ChatModule {}

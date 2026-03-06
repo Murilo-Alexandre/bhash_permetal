@@ -6,9 +6,12 @@ datasource db {
   provider = "postgresql"
 }
 
-/**
- * Empresas (global)
- */
+enum MessageContentType {
+  TEXT
+  IMAGE
+  FILE
+}
+
 model Company {
   id        String   @id @default(uuid())
   name      String   @unique
@@ -19,10 +22,6 @@ model Company {
   @@map("companies")
 }
 
-/**
- * Setores (global)
- * Ex: PCP, Expedição, TI...
- */
 model Department {
   id        String   @id @default(uuid())
   name      String   @unique
@@ -33,17 +32,14 @@ model Department {
   @@map("departments")
 }
 
-/**
- * Usuários DO CHAT (aparecem no chat)
- */
 model User {
   id                 String   @id @default(uuid())
   username           String   @unique
   name               String
 
-  // Contato (para virar "ficha do contato" no chat)
   email              String?
-  extension          String?  // ramal
+  extension          String?
+  avatarUrl          String?
 
   passwordHash       String
   isActive           Boolean  @default(true)
@@ -51,17 +47,17 @@ model User {
   createdAt          DateTime @default(now())
   lastLoginAt        DateTime?
 
-  // Empresa/Setor (globais)
   companyId          String?
   departmentId       String?
 
   company            Company?    @relation(fields: [companyId], references: [id])
   department         Department? @relation(fields: [departmentId], references: [id])
 
-  // Relações (chat)
-  conversationsA Conversation[] @relation("ConversationUserA")
-  conversationsB Conversation[] @relation("ConversationUserB")
-  sentMessages   Message[]      @relation("MessageSender")
+  conversationsA     Conversation[]   @relation("ConversationUserA")
+  conversationsB     Conversation[]   @relation("ConversationUserB")
+  sentMessages       Message[]        @relation("MessageSender")
+  favoriteMessages   MessageFavorite[]
+  reactions          MessageReaction[]
 
   @@index([companyId])
   @@index([departmentId])
@@ -69,33 +65,21 @@ model User {
   @@map("users")
 }
 
-/**
- * Admin DO PAINEL (NÃO aparece no chat)
- */
 model AdminAccount {
   id                    String   @id @default(uuid())
   username              String   @unique
   name                  String
   passwordHash          String
   isActive              Boolean  @default(true)
-
-  // ✅ já existe no projeto (pelo /admin/auth/me)
   isSuperAdmin          Boolean  @default(false)
   mustChangeCredentials Boolean  @default(false)
-
-  // ✅ para admins comuns (ou qualquer admin que você criar)
   mustChangePassword    Boolean  @default(false)
-
   createdAt             DateTime @default(now())
   lastLoginAt           DateTime?
 
   @@map("admin_accounts")
 }
 
-/**
- * Config do app (logo/cor etc.)
- * 1 registro com id = "default"
- */
 model AppConfig {
   id           String  @id
   primaryColor String  @default("#001F3F")
@@ -109,13 +93,13 @@ model Conversation {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  userAId String
-  userBId String
+  userAId   String
+  userBId   String
 
-  userA User @relation("ConversationUserA", fields: [userAId], references: [id])
-  userB User @relation("ConversationUserB", fields: [userBId], references: [id])
+  userA     User @relation("ConversationUserA", fields: [userAId], references: [id])
+  userB     User @relation("ConversationUserB", fields: [userBId], references: [id])
 
-  messages Message[]
+  messages  Message[]
 
   @@unique([userAId, userBId])
   @@index([updatedAt])
@@ -123,17 +107,63 @@ model Conversation {
 }
 
 model Message {
-  id        String   @id @default(uuid())
-  createdAt DateTime @default(now())
+  id             String             @id @default(uuid())
+  createdAt      DateTime           @default(now())
 
   conversationId String
   senderId       String
 
-  body String
+  body           String?
+  contentType    MessageContentType @default(TEXT)
 
-  conversation Conversation @relation(fields: [conversationId], references: [id])
-  sender       User         @relation("MessageSender", fields: [senderId], references: [id])
+  attachmentUrl  String?
+  attachmentName String?
+  attachmentMime String?
+  attachmentSize Int?
+
+  replyToId      String?
+  deletedAt      DateTime?
+
+  conversation   Conversation       @relation(fields: [conversationId], references: [id])
+  sender         User               @relation("MessageSender", fields: [senderId], references: [id])
+
+  replyTo        Message?           @relation("MessageReply", fields: [replyToId], references: [id])
+  replies        Message[]          @relation("MessageReply")
+
+  favorites      MessageFavorite[]
+  reactions      MessageReaction[]
 
   @@index([conversationId, createdAt])
+  @@index([replyToId])
+  @@index([senderId])
   @@map("messages")
+}
+
+model MessageFavorite {
+  id        String   @id @default(uuid())
+  messageId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([userId])
+  @@map("message_favorites")
+}
+
+model MessageReaction {
+  id        String   @id @default(uuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([userId])
+  @@map("message_reactions")
 }

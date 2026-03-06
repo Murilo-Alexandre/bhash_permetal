@@ -15,7 +15,6 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
-    // Só aceita token do CHAT
     if (payload?.type !== 'user') {
       throw new UnauthorizedException('Token inválido');
     }
@@ -29,6 +28,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         id: true,
         username: true,
         name: true,
+        email: true,
+        extension: true,
+        avatarUrl: true,
         isActive: true,
         mustChangePassword: true,
         companyId: true,
@@ -46,6 +48,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       id: user.id,
       username: user.username,
       name: user.name,
+      email: user.email ?? null,
+      extension: user.extension ?? null,
+      avatarUrl: user.avatarUrl ?? null,
       mustChangePassword: !!user.mustChangePassword,
       role: 'USER',
       companyId: user.companyId ?? null,

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Req, UseGuards, Query } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ConversationsService } from './conversations.service';
 
@@ -8,8 +8,8 @@ export class ConversationsController {
   constructor(private readonly conversations: ConversationsService) {}
 
   @Get()
-  listMine(@Req() req: any) {
-    return this.conversations.listMine(req.user.sub);
+  listMine(@Req() req: any, @Query('q') q?: string) {
+    return this.conversations.listMine(req.user.sub, q);
   }
 
   @Post('direct')

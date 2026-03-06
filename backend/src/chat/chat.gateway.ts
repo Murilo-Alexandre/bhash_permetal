@@ -4,11 +4,13 @@ import {
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
+  OnGatewayInit,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { MessagesService } from '../messages/messages.service';
+import { ChatEventsService } from './chat-events.service';
 
 function parseOrigins(v?: string) {
   return (v ?? 'http://localhost:5173')
@@ -23,7 +25,7 @@ function parseOrigins(v?: string) {
     credentials: true,
   },
 })
-export class ChatGateway {
+export class ChatGateway implements OnGatewayInit {
   @WebSocketServer()
   server!: Server;
 
@@ -33,10 +35,15 @@ export class ChatGateway {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly messages: MessagesService,
+    private readonly events: ChatEventsService,
   ) {
     const secret = this.config.get<string>('JWT_SECRET');
     if (!secret) throw new Error('JWT_SECRET não definido no .env');
     this.jwtSecret = secret;
+  }
+
+  afterInit(server: Server) {
+    this.events.setServer(server);
   }
 
   async handleConnection(client: Socket) {
@@ -45,9 +52,8 @@ export class ChatGateway {
       if (!token) throw new Error('missing token');
 
       const payload = await this.jwt.verifyAsync(token, { secret: this.jwtSecret });
-
-      // ✅ aceita user e admin
       const type = payload?.type;
+
       if (type !== 'user' && type !== 'admin') throw new Error('invalid token type');
 
       const sub = payload?.sub as string;
@@ -62,7 +68,6 @@ export class ChatGateway {
         return;
       }
 
-      // admin
       client.data.adminId = sub;
       client.join(`admin:${sub}`);
       client.emit('connected', { ok: true, type: 'admin', adminId: sub });
@@ -72,7 +77,6 @@ export class ChatGateway {
     }
   }
 
-  // user ou admin podem entrar na sala da conversa
   @SubscribeMessage('conversation:join')
   async joinConversation(
     @ConnectedSocket() client: Socket,
@@ -84,22 +88,20 @@ export class ChatGateway {
 
     if (authType === 'user') {
       const userId = client.data.userId as string;
-      // valida membership do user
       await this.messages.list(userId, body.conversationId, undefined, '1');
       client.join(`conv:${body.conversationId}`);
       return { ok: true };
     }
 
-    // admin: entra direto (admin pode ver tudo)
     client.join(`conv:${body.conversationId}`);
     return { ok: true };
   }
 
-  // ✅ somente user pode enviar mensagem
   @SubscribeMessage('message:send')
   async sendMessage(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { conversationId: string; body: string },
+    @MessageBody()
+    data: { conversationId: string; body?: string; replyToId?: string | null },
   ) {
     const authType = client.data.authType as string | undefined;
     if (authType !== 'user') return { ok: false, reason: 'forbidden' };
@@ -111,9 +113,14 @@ export class ChatGateway {
     const body = (data.body ?? '').trim();
     if (!body) return { ok: false, reason: 'empty body' };
 
-    const msg = await this.messages.send(userId, data.conversationId, body);
+    const msg = await this.messages.send({
+      userId,
+      conversationId: data.conversationId,
+      body,
+      replyToId: data.replyToId ?? null,
+    });
 
-    this.server.to(`conv:${data.conversationId}`).emit('message:new', msg);
+    this.events.emitMessageNew(data.conversationId, msg);
 
     return { ok: true, id: msg.id };
   }

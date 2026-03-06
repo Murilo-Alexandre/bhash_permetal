@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
-
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
 
@@ -21,13 +20,11 @@ import { MessagesModule } from './messages/messages.module';
 import { ChatModule } from './chat/chat.module';
 
 import { AppConfigModule } from './app-config/app-config.module';
-
 import { PrismaModule } from './prisma/prisma.module';
 
 import { AdminMePasswordController } from './admin/admin-me-password.controller';
 import { MeController } from './me/me.controller';
 import { AdminOrgController } from './admin/admin-org.controller';
-
 import { AdminUsersController } from './admin/admin-users.controller';
 import { AdminHistoryModule } from './admin-history/admin-history.module';
 
@@ -55,9 +52,7 @@ import { AdminHistoryModule } from './admin-history/admin-history.module';
     AppController,
     AdminController,
     AdminMeController,
-
-    AdminUsersController, // ✅ único controller de /admin/users
-
+    AdminUsersController,
     AdminOrgController,
     AdminMePasswordController,
     MeController,

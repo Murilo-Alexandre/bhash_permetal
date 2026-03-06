@@ -37,10 +37,15 @@ export class AuthController {
         id: true,
         username: true,
         name: true,
+        email: true,
+        extension: true,
+        avatarUrl: true,
         isActive: true,
         mustChangePassword: true,
         createdAt: true,
         lastLoginAt: true,
+        company: { select: { id: true, name: true } },
+        department: { select: { id: true, name: true } },
       },
     });
 

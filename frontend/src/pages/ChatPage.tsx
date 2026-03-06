@@ -1,16 +1,54 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, MouseEvent as ReactMouseEvent } from "react";
+import type { Socket } from "socket.io-client";
 import { useAuth } from "../auth";
 import { useTheme } from "../theme";
 import { createSocket } from "../socket";
-import type { Socket } from "socket.io-client";
 import { TopNav } from "../components/TopNav";
+import { API_BASE } from "../api";
 
-type UserMini = { id: string; username: string; name: string };
+type SearchMode = "normal" | "exact";
 
-type Conversation = {
+type UserMini = {
   id: string;
-  userA: UserMini;
-  userB: UserMini;
+  username: string;
+  name: string;
+  email?: string | null;
+  extension?: string | null;
+  avatarUrl?: string | null;
+  company?: { id: string; name: string } | null;
+  department?: { id: string; name: string } | null;
+};
+
+type ReactionRaw = {
+  id: string;
+  emoji: string;
+  userId: string;
+  user?: {
+    id: string;
+    username: string;
+    name: string;
+  };
+};
+
+type ReactionItem = {
+  emoji: string;
+  count: number;
+  reactedByMe?: boolean;
+};
+
+type ReplyToMessage = {
+  id: string;
+  body?: string | null;
+  contentType?: "TEXT" | "IMAGE" | "FILE";
+  attachmentUrl?: string | null;
+  attachmentName?: string | null;
+  sender?: {
+    id: string;
+    username: string;
+    name: string;
+    avatarUrl?: string | null;
+  };
 };
 
 type Message = {
@@ -18,43 +56,392 @@ type Message = {
   createdAt: string;
   conversationId: string;
   senderId: string;
-  body: string;
+  body?: string | null;
+  contentType?: "TEXT" | "IMAGE" | "FILE";
+  attachmentUrl?: string | null;
+  attachmentName?: string | null;
+  attachmentMime?: string | null;
+  attachmentSize?: number | null;
+  replyToId?: string | null;
+  deletedAt?: string | null;
   sender: UserMini;
+  replyTo?: ReplyToMessage | null;
+  reactions?: ReactionRaw[];
+  isFavorited?: boolean;
+};
+
+type ConversationListItem = {
+  id: string;
+  createdAt?: string;
+  updatedAt?: string;
+  otherUser: UserMini;
+  lastMessage?: Message | null;
+};
+
+type SearchHit = Message;
+
+type MediaItem = Message;
+
+type UserProfile = {
+  id: string;
+  username: string;
+  name: string;
+  email?: string | null;
+  extension?: string | null;
+  avatarUrl?: string | null;
+  company?: { id: string; name: string } | null;
+  department?: { id: string; name: string } | null;
 };
 
 type Me = {
-  sub: string;
+  id: string;
   username: string;
-  role: "ADMIN" | "USER";
+  name: string;
+  email?: string | null;
+  extension?: string | null;
+  avatarUrl?: string | null;
+  isActive?: boolean;
+  mustChangePassword?: boolean;
+  createdAt?: string;
+  lastLoginAt?: string | null;
+  company?: { id: string; name: string } | null;
+  department?: { id: string; name: string } | null;
 };
 
-type ApiPaged<T> = { items: T[] };
+type ConversationsResponse = {
+  ok: true;
+  items: ConversationListItem[];
+};
 
-const LS_KEY_HIDDEN_CONVS = "bhash_hidden_conversations";
-const LS_KEY_HIDDEN_MSGS = "bhash_hidden_messages";
+type UsersResponse = {
+  ok: true;
+  items: UserMini[];
+};
 
-function readHiddenConvs(): string[] {
+type DirectConversationResponse = {
+  ok: true;
+  conversation: {
+    id: string;
+    createdAt?: string;
+    updatedAt?: string;
+    userA: UserMini;
+    userB: UserMini;
+  };
+};
+
+type MessagesResponse = {
+  ok: true;
+  items: Message[];
+  nextCursor?: string | null;
+};
+
+type SearchResponse = {
+  ok: true;
+  items: Message[];
+  total?: number;
+};
+
+type MediaResponse = {
+  ok: true;
+  items: MediaItem[];
+};
+
+type ProfileResponse = {
+  ok: true;
+  user: UserProfile;
+};
+
+type FavoriteResponse = {
+  ok: true;
+  message: Message;
+};
+
+type ReactionResponse = {
+  ok: true;
+  message: Message;
+};
+
+const EMOJIS = [
+  "😀",
+  "😁",
+  "😂",
+  "🤣",
+  "😊",
+  "😍",
+  "😘",
+  "😎",
+  "🤔",
+  "😢",
+  "😭",
+  "😡",
+  "👍",
+  "👎",
+  "👏",
+  "🙌",
+  "🙏",
+  "🔥",
+  "❤️",
+  "💙",
+  "💚",
+  "💛",
+  "🎉",
+  "🚀",
+];
+
+function normalizeText(v: string) {
+  return v
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function fmtDateTime(v?: string | null) {
+  if (!v) return "";
   try {
-    return JSON.parse(localStorage.getItem(LS_KEY_HIDDEN_CONVS) ?? "[]");
+    return new Date(v).toLocaleString();
   } catch {
-    return [];
+    return v;
   }
 }
 
-function writeHiddenConvs(ids: string[]) {
-  localStorage.setItem(LS_KEY_HIDDEN_CONVS, JSON.stringify(ids));
-}
-
-function readHiddenMsgs(): Record<string, string[]> {
+function fmtTime(v?: string | null) {
+  if (!v) return "";
   try {
-    return JSON.parse(localStorage.getItem(LS_KEY_HIDDEN_MSGS) ?? "{}");
+    return new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   } catch {
-    return {};
+    return "";
   }
 }
 
-function writeHiddenMsgs(map: Record<string, string[]>) {
-  localStorage.setItem(LS_KEY_HIDDEN_MSGS, JSON.stringify(map));
+function fmtDayLabel(v?: string | null) {
+  if (!v) return "";
+  try {
+    const dt = new Date(v);
+    const now = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(now.getDate() - 1);
+
+    const sameDay =
+      dt.getFullYear() === now.getFullYear() &&
+      dt.getMonth() === now.getMonth() &&
+      dt.getDate() === now.getDate();
+
+    const sameYesterday =
+      dt.getFullYear() === yesterday.getFullYear() &&
+      dt.getMonth() === yesterday.getMonth() &&
+      dt.getDate() === yesterday.getDate();
+
+    if (sameDay) return "Hoje";
+    if (sameYesterday) return "Ontem";
+    return dt.toLocaleDateString();
+  } catch {
+    return "";
+  }
+}
+
+function formatBytes(bytes?: number | null) {
+  if (!bytes || bytes <= 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx++;
+  }
+  return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
+
+function toAbsoluteUrl(url?: string | null) {
+  if (!url) return null;
+  if (/^(https?:)?\/\//i.test(url) || url.startsWith("data:") || url.startsWith("blob:")) return url;
+  if (url.startsWith("/")) return `${API_BASE}${url}`;
+  return `${API_BASE}/${url}`;
+}
+
+function escapeRegExp(v: string) {
+  return v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function aggregateReactions(raw?: ReactionRaw[], myId?: string | null): ReactionItem[] {
+  if (!raw?.length) return [];
+  const map = new Map<string, ReactionItem>();
+
+  for (const item of raw) {
+    const current = map.get(item.emoji);
+    if (current) {
+      current.count += 1;
+      if (item.userId === myId) current.reactedByMe = true;
+    } else {
+      map.set(item.emoji, {
+        emoji: item.emoji,
+        count: 1,
+        reactedByMe: item.userId === myId,
+      });
+    }
+  }
+
+  return Array.from(map.values());
+}
+
+function replyPreviewText(msg?: ReplyToMessage | null) {
+  if (!msg) return "Mensagem";
+  if (msg.body?.trim()) return msg.body.trim();
+  if (msg.contentType === "IMAGE") return "Imagem";
+  if (msg.contentType === "FILE") return msg.attachmentName || "Arquivo";
+  return "Mensagem";
+}
+
+function messageSearchableText(msg: Partial<Message>) {
+  return [msg.body ?? "", msg.attachmentName ?? ""].join(" ").trim();
+}
+
+function HighlightText({
+  text,
+  query,
+}: {
+  text: string;
+  query: string;
+}) {
+  const q = query.trim();
+  if (!q) return <>{text}</>;
+
+  const safe = escapeRegExp(q);
+  const re = new RegExp(`(${safe})`, "gi");
+  const parts = text.split(re);
+
+  return (
+    <>
+      {parts.map((part, idx) =>
+        part.toLowerCase() === q.toLowerCase() ? (
+          <mark key={`${part}-${idx}`} className="chat-hl">
+            {part}
+          </mark>
+        ) : (
+          <span key={`${part}-${idx}`}>{part}</span>
+        )
+      )}
+    </>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="2" />
+      <path d="M16 16l4.5 4.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function SmileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
+      <path d="M8 14c1 1.4 2.3 2 4 2s3-.6 4-2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <circle cx="9" cy="10" r="1" fill="currentColor" />
+      <circle cx="15" cy="10" r="1" fill="currentColor" />
+    </svg>
+  );
+}
+
+function PaperclipIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path
+        d="M8 12.5l6.9-6.9a3.2 3.2 0 1 1 4.5 4.5l-9.2 9.2a5 5 0 1 1-7.1-7.1l9.6-9.6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ImageIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="2" />
+      <circle cx="9" cy="10" r="1.5" fill="currentColor" />
+      <path d="M21 16l-5-5-6 6-2-2-5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function FileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="M8 3h6l5 5v13H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" stroke="currentColor" strokeWidth="2" />
+      <path d="M14 3v6h6" stroke="currentColor" strokeWidth="2" />
+    </svg>
+  );
+}
+
+function DotsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+      <circle cx="6" cy="12" r="1.7" />
+      <circle cx="12" cy="12" r="1.7" />
+      <circle cx="18" cy="12" r="1.7" />
+    </svg>
+  );
+}
+
+function ReplyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" aria-hidden="true">
+      <path d="M10 8H5V3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 8l6-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M6 20c2-5 6-8 13-8h0" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function StarIcon({ filled = false }: { filled?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill={filled ? "currentColor" : "none"}>
+      <path
+        d="m12 3 2.7 5.47 6.03.88-4.36 4.24 1.03 5.99L12 16.76 6.6 19.58l1.03-5.99L3.27 9.35l6.03-.88L12 3Z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" aria-hidden="true">
+      <path d="M4 7h16M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6 7l1 13h10l1-13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" aria-hidden="true">
+      <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="2" />
+      <rect x="4" y="4" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="2" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+    </svg>
+  );
 }
 
 export function ChatPage() {
@@ -63,65 +450,130 @@ export function ChatPage() {
 
   const [me, setMe] = useState<Me | null>(null);
 
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeConv, setActiveConv] = useState<Conversation | null>(null);
-
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [text, setText] = useState("");
-
+  const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [loadingConvs, setLoadingConvs] = useState(false);
+
+  const [activeConv, setActiveConv] = useState<ConversationListItem | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [messagesNextCursor, setMessagesNextCursor] = useState<string | null>(null);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  const [text, setText] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [pickerError, setPickerError] = useState<string | null>(null);
+  const [users, setUsers] = useState<UserMini[]>([]);
+  const [userSearch, setUserSearch] = useState("");
+  const [userCompanyFilter, setUserCompanyFilter] = useState("");
+  const [userDepartmentFilter, setUserDepartmentFilter] = useState("");
+
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchMode, setSearchMode] = useState<SearchMode>("normal");
+  const [searchQ, setSearchQ] = useState("");
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
+  const [searchErr, setSearchErr] = useState<string | null>(null);
+  const [highlightTerm, setHighlightTerm] = useState("");
+
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+
+  const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
+  const [attachmentMode, setAttachmentMode] = useState<"image" | "file" | null>(null);
+  const [attachmentPreviewUrl, setAttachmentPreviewUrl] = useState<string | null>(null);
+
+  const [actionMenuMsgId, setActionMenuMsgId] = useState<string | null>(null);
+
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileData, setProfileData] = useState<UserProfile | null>(null);
+  const [profileMediaTab, setProfileMediaTab] = useState<"image" | "file">("image");
+  const [profileMediaItems, setProfileMediaItems] = useState<MediaItem[]>([]);
+  const [profileMediaLoading, setProfileMediaLoading] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
   const msgListRef = useRef<HTMLDivElement | null>(null);
-
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const searchDebounceRef = useRef<number | null>(null);
   const activeConvIdRef = useRef<string | null>(null);
+
   useEffect(() => {
     activeConvIdRef.current = activeConv?.id ?? null;
   }, [activeConv?.id]);
 
-  const [hiddenConvIds, setHiddenConvIds] = useState<string[]>(() => readHiddenConvs());
-  const [hiddenMsgIdsByConv, setHiddenMsgIdsByConv] = useState<Record<string, string[]>>(() => readHiddenMsgs());
+  useEffect(() => {
+    return () => {
+      if (attachmentPreviewUrl?.startsWith("blob:")) {
+        URL.revokeObjectURL(attachmentPreviewUrl);
+      }
+    };
+  }, [attachmentPreviewUrl]);
 
-  function hideConversation(convId: string) {
-    const next = Array.from(new Set([...hiddenConvIds, convId]));
-    setHiddenConvIds(next);
-    writeHiddenConvs(next);
-
-    if (activeConv?.id === convId) {
-      setActiveConv(null);
-      setMessages([]);
+  useEffect(() => {
+    function closeMenus() {
+      setActionMenuMsgId(null);
+      setEmojiOpen(false);
     }
+    window.addEventListener("click", closeMenus);
+    return () => window.removeEventListener("click", closeMenus);
+  }, []);
+
+  function scrollToBottom() {
+    requestAnimationFrame(() => {
+      const el = msgListRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
   }
 
-  function unhideConversation(convId: string) {
-    const next = hiddenConvIds.filter((x) => x !== convId);
-    setHiddenConvIds(next);
-    writeHiddenConvs(next);
+  function clearComposerAttachment() {
+    if (attachmentPreviewUrl?.startsWith("blob:")) {
+      URL.revokeObjectURL(attachmentPreviewUrl);
+    }
+    setAttachmentFile(null);
+    setAttachmentMode(null);
+    setAttachmentPreviewUrl(null);
+    if (imageInputRef.current) imageInputRef.current.value = "";
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  function hideMessage(convId: string, msgId: string) {
-    const map = { ...hiddenMsgIdsByConv };
-    const list = map[convId] ?? [];
-    map[convId] = Array.from(new Set([...list, msgId]));
-    setHiddenMsgIdsByConv(map);
-    writeHiddenMsgs(map);
+  function openActionMenu(e: ReactMouseEvent, messageId: string) {
+    e.stopPropagation();
+    setActionMenuMsgId((prev) => (prev === messageId ? null : messageId));
   }
 
-  const hiddenMsgIds = useMemo(() => {
-    if (!activeConv) return new Set<string>();
-    return new Set(hiddenMsgIdsByConv[activeConv.id] ?? []);
-  }, [activeConv, hiddenMsgIdsByConv]);
+  function copyText(v: string) {
+    void navigator.clipboard.writeText(v);
+  }
 
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [users, setUsers] = useState<UserMini[]>([]);
-  const [userSearch, setUserSearch] = useState("");
-  const [loadingUsers, setLoadingUsers] = useState(false);
-  const [pickerError, setPickerError] = useState<string | null>(null);
+  function mergeMessageIntoList(message: Message) {
+    setMessages((prev) => {
+      const next = prev.some((m) => m.id === message.id)
+        ? prev.map((m) => (m.id === message.id ? message : m))
+        : [...prev, message];
 
-  function getOtherUser(conv: Conversation) {
-    if (!me) return conv.userA;
-    return conv.userA.id === me.sub ? conv.userB : conv.userA;
+      return next.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    });
+  }
+
+  function markMessageDeleted(messageId: string, deletedAt?: string) {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === messageId
+          ? {
+              ...m,
+              body: "Mensagem apagada",
+              deletedAt: deletedAt ?? new Date().toISOString(),
+              attachmentUrl: null,
+              attachmentName: null,
+              attachmentMime: null,
+              attachmentSize: null,
+              contentType: "TEXT",
+            }
+          : m
+      )
+    );
   }
 
   async function loadMe() {
@@ -129,71 +581,427 @@ export function ChatPage() {
     setMe(res.data);
   }
 
-  async function loadConversations() {
+  async function loadConversations(selectConversationId?: string) {
     setLoadingConvs(true);
     try {
-      const res = await api.get<Conversation[]>("/conversations");
-      const visible = res.data.filter((c) => !hiddenConvIds.includes(c.id));
-      setConversations(visible);
+      const res = await api.get<ConversationsResponse>("/conversations");
+      const items = res.data.items ?? [];
+      setConversations(items);
+
+      if (selectConversationId) {
+        const found = items.find((item) => item.id === selectConversationId);
+        if (found) setActiveConv(found);
+      }
     } finally {
       setLoadingConvs(false);
     }
   }
 
-  async function openConversation(conv: Conversation) {
-    setActiveConv(conv);
+  async function loadMessages(conversationId: string, cursor?: string | null, appendTop = false) {
+    if (!conversationId) return;
+
     setLoadingMsgs(true);
-
-    socketRef.current?.emit("conversation:join", { conversationId: conv.id });
-
     try {
-      const res = await api.get<ApiPaged<Message>>(`/conversations/${conv.id}/messages`);
-      setMessages(res.data.items);
-      requestAnimationFrame(() => {
-        const el = msgListRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+      const res = await api.get<MessagesResponse>(`/conversations/${conversationId}/messages`, {
+        params: {
+          ...(cursor ? { cursor } : {}),
+          take: 60,
+        },
       });
+
+      const items = res.data.items ?? [];
+
+      setMessages((prev) => {
+        if (!appendTop) return items;
+
+        const merged = [...items, ...prev];
+        const map = new Map<string, Message>();
+
+        for (const msg of merged) map.set(msg.id, msg);
+
+        return Array.from(map.values()).sort(
+          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
+      });
+
+      setMessagesNextCursor(res.data.nextCursor ?? null);
+
+      if (!appendTop) scrollToBottom();
     } finally {
       setLoadingMsgs(false);
     }
   }
 
-  async function sendMessage() {
-    if (!activeConv || !text.trim()) return;
+  async function openConversation(conv: ConversationListItem) {
+    setActiveConv(conv);
+    setSearchOpen(false);
+    setSearchQ("");
+    setSearchHits([]);
+    setSearchErr(null);
+    setHighlightTerm("");
+    setReplyTo(null);
+    setActionMenuMsgId(null);
+    clearComposerAttachment();
 
-    socketRef.current?.emit("message:send", {
-      conversationId: activeConv.id,
-      body: text.trim(),
-    });
+    socketRef.current?.emit("conversation:join", { conversationId: conv.id });
 
-    setText("");
+    await loadMessages(conv.id);
   }
 
   async function loadUsers() {
     setLoadingUsers(true);
     setPickerError(null);
     try {
-      const res = await api.get<UserMini[]>("/users");
-      const list = me ? res.data.filter((u) => u.id !== me.sub) : res.data;
-      setUsers(list);
+      const res = await api.get<UsersResponse>("/users");
+      const list = res.data.items ?? [];
+      const filtered = me?.id ? list.filter((u) => u.id !== me.id) : list;
+      setUsers(filtered);
     } catch (e: any) {
-      setPickerError(e?.response?.data?.message ?? e?.message ?? "Falha ao carregar usuários");
+      setPickerError(e?.response?.data?.message ?? e?.message ?? "Falha ao carregar colaboradores");
     } finally {
       setLoadingUsers(false);
     }
   }
 
   async function startDirect(otherUserId: string) {
-    const conv = await api.post<Conversation>("/conversations/direct", { otherUserId }).then((r) => r.data);
+    const res = await api.post<DirectConversationResponse>("/conversations/direct", { otherUserId });
+    const created = res.data.conversation;
 
-    if (hiddenConvIds.includes(conv.id)) {
-      unhideConversation(conv.id);
+    setPickerOpen(false);
+    await loadConversations(created.id);
+
+    const currentMeId = me?.id;
+    const otherUser =
+      currentMeId && created.userA.id === currentMeId ? created.userB : created.userA;
+
+    await openConversation({
+      id: created.id,
+      createdAt: created.createdAt,
+      updatedAt: created.updatedAt,
+      otherUser,
+      lastMessage: null,
+    });
+  }
+
+  async function runSearch(query: string) {
+    if (!activeConv?.id) return;
+    const q = query.trim();
+
+    if (!q) {
+      setSearchHits([]);
+      setSearchErr(null);
+      setHighlightTerm("");
+      return;
     }
 
-    await loadConversations();
-    setPickerOpen(false);
-    await openConversation(conv);
+    setSearchLoading(true);
+    setSearchErr(null);
+
+    try {
+      const res = await api.get<SearchResponse>(`/conversations/${activeConv.id}/search`, {
+        params: {
+          q,
+          take: 120,
+        },
+      });
+
+      let items = res.data.items ?? [];
+
+      if (searchMode === "exact") {
+        const nq = normalizeText(q);
+        items = items.filter((item) => normalizeText(messageSearchableText(item)) === nq);
+      }
+
+      setSearchHits(items);
+      setHighlightTerm(q);
+    } catch (e: any) {
+      setSearchErr(e?.response?.data?.message ?? "Falha ao buscar na conversa");
+      setSearchHits([]);
+    } finally {
+      setSearchLoading(false);
+    }
   }
+
+  async function jumpToHit(hit: SearchHit) {
+    if (!activeConv?.id) return;
+
+    try {
+      const res = await api.get<MessagesResponse & { anchorId?: string }>(
+        `/conversations/${activeConv.id}/messages/around`,
+        {
+          params: {
+            messageId: hit.id,
+            take: 80,
+          },
+        }
+      );
+
+      const items = res.data.items ?? [];
+      setMessages(items);
+      setMessagesNextCursor(null);
+      setHighlightTerm(searchQ.trim());
+
+      requestAnimationFrame(() => {
+        const container = msgListRef.current;
+        if (!container) return;
+
+        const row = container.querySelector(`[data-mid="${hit.id}"]`) as HTMLElement | null;
+        if (row) {
+          row.scrollIntoView({ behavior: "smooth", block: "center" });
+          row.classList.add("chat-msg-flash");
+          window.setTimeout(() => row.classList.remove("chat-msg-flash"), 1200);
+        }
+      });
+    } catch (e: any) {
+      setSearchErr(e?.response?.data?.message ?? "Falha ao abrir ocorrência");
+    }
+  }
+
+  async function loadProfileDrawer() {
+    const other = activeConv?.otherUser;
+    if (!other?.id || !activeConv?.id) return;
+
+    setProfileOpen(true);
+    setProfileLoading(true);
+
+    try {
+      const res = await api.get<ProfileResponse>(`/users/${other.id}/profile`);
+      setProfileData(res.data.user);
+    } catch {
+      setProfileData({
+        id: other.id,
+        username: other.username,
+        name: other.name,
+        email: other.email ?? null,
+        extension: other.extension ?? null,
+        avatarUrl: other.avatarUrl ?? null,
+        company: other.company ?? null,
+        department: other.department ?? null,
+      });
+    } finally {
+      setProfileLoading(false);
+    }
+  }
+
+  async function loadProfileMedia(kind: "image" | "file") {
+    if (!activeConv?.id) return;
+
+    setProfileMediaLoading(true);
+    try {
+      const res = await api.get<MediaResponse>(`/conversations/${activeConv.id}/media`, {
+        params: { kind },
+      });
+      setProfileMediaItems(res.data.items ?? []);
+    } catch {
+      setProfileMediaItems([]);
+    } finally {
+      setProfileMediaLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!profileOpen || !activeConv?.id) return;
+    void loadProfileMedia(profileMediaTab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileOpen, profileMediaTab, activeConv?.id]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+
+    if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
+
+    searchDebounceRef.current = window.setTimeout(() => {
+      void runSearch(searchQ);
+    }, 260);
+
+    return () => {
+      if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQ, searchMode, searchOpen, activeConv?.id]);
+
+  function handleImagePicked(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    clearComposerAttachment();
+    const previewUrl = URL.createObjectURL(file);
+    setAttachmentFile(file);
+    setAttachmentMode("image");
+    setAttachmentPreviewUrl(previewUrl);
+  }
+
+  function handleFilePicked(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    clearComposerAttachment();
+    setAttachmentFile(file);
+    setAttachmentMode("file");
+    setAttachmentPreviewUrl(null);
+  }
+
+  async function sendMessage() {
+    if (!activeConv) return;
+
+    const trimmed = text.trim();
+    const hasText = !!trimmed;
+    const hasAttachment = !!attachmentFile;
+
+    if (!hasText && !hasAttachment) return;
+    if (sending) return;
+
+    setSending(true);
+    try {
+      if (hasAttachment) {
+        const form = new FormData();
+        if (trimmed) form.append("body", trimmed);
+        form.append("file", attachmentFile as File);
+        form.append("uploadMode", attachmentMode === "file" ? "file" : "image");
+        if (replyTo?.id) form.append("replyToId", replyTo.id);
+
+        const res = await api.post<{ ok: true; message: Message }>(
+          `/conversations/${activeConv.id}/messages`,
+          form,
+          {
+            headers: { "Content-Type": "multipart/form-data" },
+          }
+        );
+
+        mergeMessageIntoList(res.data.message);
+        scrollToBottom();
+      } else {
+        socketRef.current?.emit("message:send", {
+          conversationId: activeConv.id,
+          body: trimmed,
+          replyToId: replyTo?.id ?? null,
+        });
+      }
+
+      setText("");
+      setReplyTo(null);
+      clearComposerAttachment();
+      setEmojiOpen(false);
+      await loadConversations(activeConv.id);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function toggleFavorite(message: Message) {
+    try {
+      const res = await api.patch<FavoriteResponse>(`/messages/${message.id}/favorite`, {
+        value: !message.isFavorited,
+      });
+
+      mergeMessageIntoList(res.data.message);
+    } catch {}
+  }
+
+  async function reactToMessage(message: Message, emoji: string) {
+    try {
+      const reactedByMe = aggregateReactions(message.reactions, me?.id).some(
+        (item) => item.emoji === emoji && item.reactedByMe
+      );
+
+      const res = await api.post<ReactionResponse>(`/messages/${message.id}/reaction`, {
+        emoji: reactedByMe ? null : emoji,
+      });
+
+      mergeMessageIntoList(res.data.message);
+    } catch {}
+  }
+
+  async function deleteMessage(messageId: string) {
+    try {
+      await api.delete(`/messages/${messageId}`);
+      markMessageDeleted(messageId);
+    } catch {}
+  }
+
+  function groupedMessages(items: Message[]) {
+    const out: Array<{ kind: "sep"; label: string } | { kind: "msg"; value: Message }> = [];
+    let last = "";
+
+    for (const msg of items) {
+      const label = fmtDayLabel(msg.createdAt);
+      if (label !== last) {
+        out.push({ kind: "sep", label });
+        last = label;
+      }
+      out.push({ kind: "msg", value: msg });
+    }
+
+    return out;
+  }
+
+  const grouped = useMemo(() => groupedMessages(messages), [messages]);
+
+  const usersFiltered = useMemo(() => {
+    const nq = normalizeText(userSearch);
+
+    return users.filter((u) => {
+      const companyOk = !userCompanyFilter || u.company?.name === userCompanyFilter;
+      const departmentOk = !userDepartmentFilter || u.department?.name === userDepartmentFilter;
+
+      if (!companyOk || !departmentOk) return false;
+      if (!nq) return true;
+
+      const values = [
+        u.name,
+        u.username,
+        u.email ?? "",
+        u.extension ?? "",
+        u.company?.name ?? "",
+        u.department?.name ?? "",
+      ].map(normalizeText);
+
+      return values.some((value) => value.includes(nq));
+    });
+  }, [users, userSearch, userCompanyFilter, userDepartmentFilter]);
+
+  const groupedUsers = useMemo(() => {
+    const map = new Map<string, UserMini[]>();
+
+    for (const user of usersFiltered) {
+      const company = user.company?.name ?? "Sem empresa";
+      const department = user.department?.name ?? "Sem setor";
+      const key = `${company}|||${department}`;
+      const list = map.get(key) ?? [];
+      list.push(user);
+      map.set(key, list);
+    }
+
+    return Array.from(map.entries())
+      .map(([key, list]) => {
+        const [company, department] = key.split("|||");
+        return {
+          company,
+          department,
+          users: list.sort((a, b) => a.name.localeCompare(b.name)),
+        };
+      })
+      .sort((a, b) => {
+        if (a.company !== b.company) return a.company.localeCompare(b.company);
+        return a.department.localeCompare(b.department);
+      });
+  }, [usersFiltered]);
+
+  const companyOptions = useMemo(() => {
+    return Array.from(new Set(users.map((u) => u.company?.name).filter(Boolean) as string[])).sort((a, b) =>
+      a.localeCompare(b)
+    );
+  }, [users]);
+
+  const departmentOptions = useMemo(() => {
+    return Array.from(new Set(users.map((u) => u.department?.name).filter(Boolean) as string[])).sort((a, b) =>
+      a.localeCompare(b)
+    );
+  }, [users]);
+
+  const favoriteMessages = useMemo(() => {
+    return messages.filter((m) => m.isFavorited);
+  }, [messages]);
 
   useEffect(() => {
     if (!token) return;
@@ -203,18 +1011,28 @@ export function ChatPage() {
 
     s.on("message:new", (msg: Message) => {
       const currentConvId = activeConvIdRef.current;
-      if (!currentConvId) return;
-      if (msg.conversationId !== currentConvId) return;
+      if (!currentConvId || msg.conversationId !== currentConvId) return;
 
-      setMessages((prev) => [...prev, msg]);
+      mergeMessageIntoList(msg);
 
       requestAnimationFrame(() => {
         const el = msgListRef.current;
         if (!el) return;
         const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
-        const nearBottom = distanceFromBottom < 120;
-        if (nearBottom) el.scrollTop = el.scrollHeight;
+        if (distanceFromBottom < 140) el.scrollTop = el.scrollHeight;
       });
+
+      void loadConversations(currentConvId);
+    });
+
+    s.on("message:updated", (msg: Message) => {
+      const currentConvId = activeConvIdRef.current;
+      if (!currentConvId || msg.conversationId !== currentConvId) return;
+      mergeMessageIntoList(msg);
+    });
+
+    s.on("message:deleted", (payload: { id: string; deletedAt?: string }) => {
+      markMessageDeleted(payload.id, payload.deletedAt);
     });
 
     return () => {
@@ -224,7 +1042,7 @@ export function ChatPage() {
   }, [token]);
 
   useEffect(() => {
-    (async () => {
+    void (async () => {
       await loadMe();
       await loadConversations();
     })();
@@ -233,412 +1051,746 @@ export function ChatPage() {
 
   useEffect(() => {
     if (!pickerOpen) return;
-    loadUsers();
+    void loadUsers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pickerOpen]);
 
-  const filteredUsers = useMemo(() => {
-    const q = userSearch.trim().toLowerCase();
-    if (!q) return users;
-    return users.filter((u) => u.name.toLowerCase().includes(q) || u.username.toLowerCase().includes(q));
-  }, [users, userSearch]);
-
-  const primary = "var(--bhash-primary)";
-  const bg = "var(--bg)";
-  const fg = "var(--fg)";
-  const cardBg = "var(--card-bg)";
-  const inputBg = "var(--input-bg)";
-  const inputBorder = "var(--input-border)";
-  const border = "var(--bhash-border, rgba(255,255,255,0.12))";
-
   return (
-    <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: bg, color: fg }}>
+    <div className="chat-shell">
       <TopNav
         title="BHASH • Chat"
-        subtitle={`${me?.username ?? "—"} • ${me?.role ?? "—"}`}
+        subtitle={me ? `${me.username}` : ""}
         theme={theme}
         onToggleTheme={toggleTheme}
         logoSrc={resolvedLogoUrl}
         rightSlot={
-          <button
-            onClick={logout}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.22)",
-              background: "rgba(255, 0, 0, 0.83)",
-              color: "#fff",
-              cursor: "pointer",
-              fontWeight: 800,
-            }}
-          >
+          <button className="chat-dangerBtn" onClick={logout}>
             Sair
           </button>
         }
       />
 
-      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "360px 1fr", minHeight: 0, padding: "12px 16px 16px" }}>
-        <aside
-          style={{
-            minHeight: 0,
-            border: `1px solid ${border}`,
-            borderRadius: 18,
-            display: "flex",
-            flexDirection: "column",
-            background: theme === "dark" ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.45)",
-            backdropFilter: "blur(10px)",
-            overflow: "hidden",
-          }}
-        >
-          <div style={{ padding: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-            <div style={{ fontWeight: 800, fontSize: 16 }}>Conversas</div>
-
-            <button
-              onClick={() => setPickerOpen(true)}
-              style={{
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: `1px solid ${border}`,
-                background: primary,
-                color: "#fff",
-                fontWeight: 800,
-                cursor: "pointer",
-              }}
-              title="Nova conversa"
-            >
-              + Nova
+      <div className="chat-layout">
+        <aside className="chat-sidebar">
+          <div className="chat-sidebar__header">
+            <div className="chat-sidebar__title">Conversas</div>
+            <button className="chat-primaryIconBtn" onClick={() => setPickerOpen(true)} title="Nova conversa">
+              <PlusIcon />
+              <span>Nova</span>
             </button>
           </div>
 
-          <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div className="chat-sidebar__list">
             {loadingConvs ? (
-              <div style={{ opacity: 0.8 }}>Carregando conversas…</div>
+              <div className="chat-empty">Carregando conversas…</div>
             ) : conversations.length === 0 ? (
-              <div style={{ opacity: 0.8 }}>Nenhuma conversa ainda.</div>
+              <div className="chat-empty">Nenhuma conversa ainda.</div>
             ) : (
-              conversations.map((c) => {
-                const other = getOtherUser(c);
-                const active = activeConv?.id === c.id;
+              conversations.map((conv) => {
+                const other = conv.otherUser;
+                const active = activeConv?.id === conv.id;
+                const avatar = toAbsoluteUrl(other.avatarUrl);
 
                 return (
-                  <div
-                    key={c.id}
-                    style={{
-                      border: `1px solid ${border}`,
-                      background: active ? (theme === "dark" ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)") : cardBg,
-                      borderRadius: 14,
-                      padding: 10,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      gap: 10,
-                    }}
+                  <button
+                    key={conv.id}
+                    className={`chat-convCard ${active ? "is-active" : ""}`}
+                    onClick={() => void openConversation(conv)}
                   >
-                    <button
-                      onClick={() => openConversation(c)}
-                      style={{
-                        flex: 1,
-                        textAlign: "left",
-                        border: "none",
-                        background: "transparent",
-                        color: fg,
-                        cursor: "pointer",
-                        padding: 0,
-                      }}
-                    >
-                      <div style={{ fontWeight: 800 }}>{other.name}</div>
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>@{other.username}</div>
-                    </button>
+                    <div className="chat-avatar chat-avatar--md">
+                      {avatar ? <img src={avatar} alt={other.name} /> : <span>{other.name.slice(0, 1).toUpperCase()}</span>}
+                    </div>
 
-                    <button
-                      onClick={() => hideConversation(c.id)}
-                      style={{
-                        borderRadius: 10,
-                        border: `1px solid ${border}`,
-                        background: "transparent",
-                        color: fg,
-                        padding: "8px 10px",
-                        cursor: "pointer",
-                      }}
-                      title="Remover da lista (somente visual)"
-                    >
-                      🗑️
-                    </button>
-                  </div>
+                    <div className="chat-convCard__main">
+                      <div className="chat-convCard__name">{other.name}</div>
+                      <div className="chat-convCard__meta">
+                        {other.department?.name ?? "Sem setor"}
+                        {other.company?.name ? ` • ${other.company.name}` : ""}
+                      </div>
+                    </div>
+                  </button>
                 );
               })
             )}
           </div>
-
-          {hiddenConvIds.length > 0 && (
-            <div style={{ padding: 12, borderTop: `1px solid ${border}`, display: "flex", flexDirection: "column", gap: 8 }}>
-              <div style={{ fontSize: 12, opacity: 0.85 }}>Ocultas (somente você)</div>
-              <button
-                onClick={() => {
-                  setHiddenConvIds([]);
-                  writeHiddenConvs([]);
-                  loadConversations();
-                }}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: `1px solid ${border}`,
-                  background: "transparent",
-                  color: fg,
-                  cursor: "pointer",
-                }}
-              >
-                Restaurar todas
-              </button>
-            </div>
-          )}
         </aside>
 
-        <main style={{ minHeight: 0, display: "flex", flexDirection: "column", marginLeft: 12 }}>
-          <div
-            style={{
-              padding: 12,
-              border: `1px solid ${border}`,
-              borderRadius: 18,
-              background: theme === "dark" ? "rgba(0,0,0,0.18)" : "rgba(255,255,255,0.6)",
-              backdropFilter: "blur(10px)",
-            }}
-          >
+        <main className="chat-main">
+          <div className="chat-mainHeader">
             {activeConv ? (
-              <>
-                <div style={{ fontWeight: 900, fontSize: 16 }}>Chat com {getOtherUser(activeConv).name}</div>
-                <div style={{ fontSize: 12, opacity: 0.8 }}>@{getOtherUser(activeConv).username}</div>
-              </>
+              <button className="chat-contactBtn" onClick={() => void loadProfileDrawer()}>
+                <div className="chat-avatar chat-avatar--lg">
+                  {(() => {
+                    const other = activeConv.otherUser;
+                    const avatar = toAbsoluteUrl(other.avatarUrl);
+                    return avatar ? <img src={avatar} alt={other.name} /> : <span>{other.name.slice(0, 1).toUpperCase()}</span>;
+                  })()}
+                </div>
+
+                <div className="chat-mainHeader__text">
+                  <div className="chat-mainHeader__name">{activeConv.otherUser.name}</div>
+                  <div className="chat-mainHeader__sub">
+                    {activeConv.otherUser.department?.name ?? "Sem setor"}
+                    {activeConv.otherUser.company?.name ? ` • ${activeConv.otherUser.company.name}` : ""}
+                  </div>
+                </div>
+              </button>
             ) : (
-              <div style={{ fontWeight: 900 }}>Selecione uma conversa</div>
+              <div className="chat-mainHeader__placeholder">Selecione uma conversa</div>
             )}
+
+            {activeConv ? (
+              <div className="chat-mainHeader__actions">
+                <button
+                  className={`chat-iconBtn ${searchOpen ? "is-active" : ""}`}
+                  onClick={() => {
+                    setSearchOpen((prev) => !prev);
+                    setSearchErr(null);
+                    if (searchOpen) {
+                      setSearchQ("");
+                      setSearchHits([]);
+                      setHighlightTerm("");
+                    }
+                  }}
+                  title="Buscar na conversa"
+                >
+                  <SearchIcon />
+                </button>
+              </div>
+            ) : null}
           </div>
 
-          <div
-            ref={msgListRef}
-            style={{
-              flex: 1,
-              minHeight: 0,
-              overflow: "auto",
-              padding: 14,
-              display: "flex",
-              flexDirection: "column",
-              gap: 10,
-              marginTop: 12,
-              border: `1px solid ${border}`,
-              borderRadius: 18,
-              background:
-                theme === "dark"
-                  ? "radial-gradient(1200px 600px at 50% 0%, rgba(0,31,63,0.18), transparent 60%)"
-                  : "radial-gradient(1200px 600px at 50% 0%, rgba(0,31,63,0.10), transparent 60%)",
-            }}
-          >
-            {!activeConv ? (
-              <div style={{ opacity: 0.75 }}>Abra uma conversa para ver as mensagens.</div>
-            ) : loadingMsgs ? (
-              <div style={{ opacity: 0.75 }}>Carregando mensagens…</div>
-            ) : (
-              messages
-                .filter((m) => !hiddenMsgIds.has(m.id))
-                .map((m) => {
-                  const isMine = me?.sub === m.senderId;
-
-                  return (
-                    <div
-                      key={m.id}
-                      style={{
-                        alignSelf: isMine ? "flex-end" : "flex-start",
-                        maxWidth: 560,
-                        borderRadius: 14,
-                        border: `1px solid ${border}`,
-                        padding: 10,
-                        background: theme === "dark" ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.75)",
-                      }}
-                    >
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                        <div style={{ fontSize: 12, opacity: 0.85, fontWeight: 700 }}>
-                          {m.sender.name} • {new Date(m.createdAt).toLocaleString()}
-                        </div>
-
-                        <button
-                          onClick={() => activeConv && hideMessage(activeConv.id, m.id)}
-                          style={{
-                            borderRadius: 10,
-                            border: `1px solid ${border}`,
-                            background: "transparent",
-                            color: fg,
-                            padding: "6px 8px",
-                            cursor: "pointer",
-                            fontSize: 12,
-                          }}
-                          title="Ocultar mensagem (somente você)"
-                        >
-                          🗑️
-                        </button>
-                      </div>
-
-                      <div style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>{m.body}</div>
-                    </div>
-                  );
-                })
-            )}
-          </div>
-
-          <div
-            style={{
-              padding: 12,
-              border: `1px solid ${border}`,
-              borderRadius: 18,
-              display: "flex",
-              gap: 10,
-              background: theme === "dark" ? "rgba(0,0,0,0.18)" : "rgba(255,255,255,0.6)",
-              backdropFilter: "blur(10px)",
-              marginTop: 12,
-            }}
-          >
-            <input
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder={activeConv ? "Digite sua mensagem..." : "Selecione uma conversa..."}
-              style={{
-                flex: 1,
-                padding: "12px 12px",
-                borderRadius: 12,
-                border: `1px solid ${inputBorder}`,
-                background: inputBg,
-                color: fg,
-                outline: "none",
-              }}
-              disabled={!activeConv}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") sendMessage();
-              }}
-            />
-
-            <button
-              onClick={sendMessage}
-              disabled={!activeConv || !text.trim()}
-              style={{
-                padding: "12px 14px",
-                borderRadius: 12,
-                border: `1px solid ${border}`,
-                background: primary,
-                color: "#fff",
-                fontWeight: 900,
-                cursor: !activeConv || !text.trim() ? "not-allowed" : "pointer",
-                opacity: !activeConv || !text.trim() ? 0.55 : 1,
+          <div className={searchOpen ? "chat-content chat-content--withSearch" : "chat-content"}>
+            <div
+              ref={msgListRef}
+              className="chat-messageList"
+              onScroll={() => {
+                const el = msgListRef.current;
+                if (!el || !activeConv?.id || !messagesNextCursor || loadingMsgs) return;
+                if (el.scrollTop < 120) {
+                  void loadMessages(activeConv.id, messagesNextCursor, true);
+                }
               }}
             >
-              Enviar
-            </button>
+              {!activeConv ? (
+                <div className="chat-empty">Abra uma conversa para ver as mensagens.</div>
+              ) : loadingMsgs && messages.length === 0 ? (
+                <div className="chat-empty">Carregando mensagens…</div>
+              ) : (
+                <>
+                  {messagesNextCursor ? <div className="chat-topHint">Role para cima para carregar mais</div> : null}
+
+                  <div className="chat-messageStack">
+                    {grouped.map((row, idx) => {
+                      if (row.kind === "sep") {
+                        return (
+                          <div key={`sep-${row.label}-${idx}`} className="chat-daySep">
+                            {row.label}
+                          </div>
+                        );
+                      }
+
+                      const msg = row.value;
+                      const isMine = me?.id === msg.senderId;
+                      const imageUrl = toAbsoluteUrl(msg.attachmentUrl);
+                      const replyPreview = replyPreviewText(msg.replyTo);
+                      const reactions = aggregateReactions(msg.reactions, me?.id ?? null);
+
+                      return (
+                        <div
+                          key={msg.id}
+                          data-mid={msg.id}
+                          className={`chat-msgRow ${isMine ? "is-mine" : "is-other"}`}
+                        >
+                          <div className={`chat-bubble ${isMine ? "is-mine" : "is-other"}`}>
+                            {!msg.deletedAt ? (
+                              <button
+                                className="chat-msgMenuBtn"
+                                onClick={(e) => openActionMenu(e, msg.id)}
+                                title="Ações"
+                              >
+                                <DotsIcon />
+                              </button>
+                            ) : null}
+
+                            {actionMenuMsgId === msg.id && !msg.deletedAt ? (
+                              <div className="chat-msgMenu" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                  className="chat-msgMenu__item"
+                                  onClick={() => {
+                                    setReplyTo(msg);
+                                    setActionMenuMsgId(null);
+                                  }}
+                                >
+                                  <ReplyIcon />
+                                  <span>Responder</span>
+                                </button>
+
+                                <button
+                                  className="chat-msgMenu__item"
+                                  onClick={() => {
+                                    const content =
+                                      msg.body?.trim() ||
+                                      msg.attachmentUrl ||
+                                      msg.attachmentName ||
+                                      "";
+                                    if (content) copyText(content);
+                                    setActionMenuMsgId(null);
+                                  }}
+                                >
+                                  <CopyIcon />
+                                  <span>Copiar</span>
+                                </button>
+
+                                <button
+                                  className="chat-msgMenu__item"
+                                  onClick={() => {
+                                    void toggleFavorite(msg);
+                                    setActionMenuMsgId(null);
+                                  }}
+                                >
+                                  <StarIcon filled={!!msg.isFavorited} />
+                                  <span>{msg.isFavorited ? "Desfavoritar" : "Favoritar"}</span>
+                                </button>
+
+                                <div className="chat-msgMenu__reactions">
+                                  {EMOJIS.slice(0, 8).map((emoji) => (
+                                    <button
+                                      key={`${msg.id}-${emoji}`}
+                                      className="chat-reactionQuickBtn"
+                                      onClick={() => {
+                                        void reactToMessage(msg, emoji);
+                                        setActionMenuMsgId(null);
+                                      }}
+                                    >
+                                      {emoji}
+                                    </button>
+                                  ))}
+                                </div>
+
+                                {isMine ? (
+                                  <button
+                                    className="chat-msgMenu__item chat-msgMenu__item--danger"
+                                    onClick={() => {
+                                      void deleteMessage(msg.id);
+                                      setActionMenuMsgId(null);
+                                    }}
+                                  >
+                                    <TrashIcon />
+                                    <span>Apagar</span>
+                                  </button>
+                                ) : null}
+                              </div>
+                            ) : null}
+
+                            {!isMine ? <div className="chat-bubble__sender">{msg.sender.name}</div> : null}
+
+                            {msg.replyTo ? (
+                              <div className="chat-replyBlock">
+                                <div className="chat-replyBlock__name">{msg.replyTo.sender?.name ?? "Mensagem"}</div>
+                                <div className="chat-replyBlock__body">{replyPreview}</div>
+                              </div>
+                            ) : null}
+
+                            {msg.contentType === "IMAGE" && imageUrl ? (
+                              <a
+                                href={imageUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="chat-imageLink"
+                              >
+                                <img src={imageUrl} alt={msg.attachmentName ?? "imagem"} className="chat-imagePreview" />
+                              </a>
+                            ) : null}
+
+                            {msg.contentType === "FILE" && imageUrl ? (
+                              <a
+                                href={imageUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="chat-fileCard"
+                              >
+                                <div className="chat-fileCard__icon">
+                                  <FileIcon />
+                                </div>
+                                <div className="chat-fileCard__text">
+                                  <div className="chat-fileCard__name">{msg.attachmentName ?? "Arquivo"}</div>
+                                  <div className="chat-fileCard__meta">
+                                    {msg.attachmentMime ?? "Arquivo"}
+                                    {msg.attachmentSize ? ` • ${formatBytes(msg.attachmentSize)}` : ""}
+                                  </div>
+                                </div>
+                              </a>
+                            ) : null}
+
+                            {msg.body?.trim() ? (
+                              <div className="chat-bubble__body">
+                                {highlightTerm.trim() ? (
+                                  <HighlightText text={msg.body} query={highlightTerm} />
+                                ) : (
+                                  msg.body
+                                )}
+                              </div>
+                            ) : null}
+
+                            {reactions.length ? (
+                              <div className="chat-reactions">
+                                {reactions.map((reaction) => (
+                                  <button
+                                    key={`${msg.id}-${reaction.emoji}`}
+                                    className={`chat-reactionChip ${reaction.reactedByMe ? "is-active" : ""}`}
+                                    onClick={() => void reactToMessage(msg, reaction.emoji)}
+                                  >
+                                    <span>{reaction.emoji}</span>
+                                    <span>{reaction.count}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+
+                            <div className="chat-bubble__meta">
+                              {msg.isFavorited ? <span title="Favorita">★</span> : null}
+                              <span>{fmtTime(msg.createdAt)}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {searchOpen ? (
+              <aside className="chat-searchPanel">
+                <div className="chat-searchPanel__header">
+                  <div className="chat-searchPanel__title">Pesquisar mensagens</div>
+
+                  <button
+                    className="chat-iconBtn"
+                    onClick={() => {
+                      setSearchOpen(false);
+                      setSearchQ("");
+                      setSearchHits([]);
+                      setHighlightTerm("");
+                    }}
+                    title="Fechar"
+                  >
+                    <CloseIcon />
+                  </button>
+                </div>
+
+                <div className="chat-searchPanel__controls">
+                  <input
+                    value={searchQ}
+                    onChange={(e) => setSearchQ(e.target.value)}
+                    placeholder="Buscar..."
+                    className="chat-input"
+                  />
+
+                  <div className="chat-modeToggle">
+                    <button
+                      className={`chat-modeToggle__btn ${searchMode === "normal" ? "is-active" : ""}`}
+                      onClick={() => setSearchMode("normal")}
+                    >
+                      Normal
+                    </button>
+                    <button
+                      className={`chat-modeToggle__btn ${searchMode === "exact" ? "is-active" : ""}`}
+                      onClick={() => setSearchMode("exact")}
+                    >
+                      Exata
+                    </button>
+                  </div>
+
+                  {searchErr ? <div className="chat-error">{searchErr}</div> : null}
+
+                  <div className="chat-searchPanel__count">
+                    {!searchQ.trim()
+                      ? "Digite para buscar em tempo real."
+                      : searchLoading
+                      ? "Buscando..."
+                      : `${searchHits.length} resultado(s)`}
+                  </div>
+                </div>
+
+                <div className="chat-searchPanel__list">
+                  {!searchQ.trim() ? null : searchHits.length === 0 && !searchLoading ? (
+                    <div className="chat-empty">Nenhuma ocorrência.</div>
+                  ) : (
+                    searchHits.map((hit) => (
+                      <button
+                        key={hit.id}
+                        className="chat-searchHit"
+                        onClick={() => void jumpToHit(hit)}
+                      >
+                        <div className="chat-searchHit__top">
+                          <span>{fmtTime(hit.createdAt)}</span>
+                          <span>{fmtDayLabel(hit.createdAt)}</span>
+                        </div>
+                        <div className="chat-searchHit__body">
+                          <HighlightText
+                            text={
+                              hit.body?.trim() ||
+                              (hit.contentType === "IMAGE"
+                                ? "Imagem"
+                                : hit.contentType === "FILE"
+                                ? hit.attachmentName || "Arquivo"
+                                : "")
+                            }
+                            query={searchQ.trim()}
+                          />
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </aside>
+            ) : null}
+          </div>
+
+          <div className="chat-composerWrap">
+            {replyTo ? (
+              <div className="chat-replyComposer">
+                <div className="chat-replyComposer__text">
+                  <strong>Respondendo:</strong> {replyPreviewText(replyTo)}
+                </div>
+                <button className="chat-iconBtn chat-iconBtn--sm" onClick={() => setReplyTo(null)}>
+                  <CloseIcon />
+                </button>
+              </div>
+            ) : null}
+
+            {attachmentFile ? (
+              <div className="chat-attachmentPreview">
+                {attachmentMode === "image" && attachmentPreviewUrl ? (
+                  <img src={attachmentPreviewUrl} alt="preview" className="chat-attachmentPreview__image" />
+                ) : (
+                  <div className="chat-attachmentPreview__file">
+                    <FileIcon />
+                    <div>
+                      <div className="chat-attachmentPreview__fileName">{attachmentFile.name}</div>
+                      <div className="chat-attachmentPreview__fileMeta">{formatBytes(attachmentFile.size)}</div>
+                    </div>
+                  </div>
+                )}
+
+                <button className="chat-iconBtn chat-iconBtn--sm" onClick={clearComposerAttachment}>
+                  <CloseIcon />
+                </button>
+              </div>
+            ) : null}
+
+            <div className="chat-composer">
+              <div className="chat-composer__actions">
+                <button
+                  className={`chat-iconBtn ${emojiOpen ? "is-active" : ""}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEmojiOpen((prev) => !prev);
+                  }}
+                  title="Emojis"
+                  disabled={!activeConv}
+                >
+                  <SmileIcon />
+                </button>
+
+                <button
+                  className="chat-iconBtn"
+                  onClick={() => imageInputRef.current?.click()}
+                  title="Enviar imagem"
+                  disabled={!activeConv}
+                >
+                  <ImageIcon />
+                </button>
+
+                <button
+                  className="chat-iconBtn"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Enviar arquivo"
+                  disabled={!activeConv}
+                >
+                  <PaperclipIcon />
+                </button>
+
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: "none" }}
+                  onChange={handleImagePicked}
+                />
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  style={{ display: "none" }}
+                  onChange={handleFilePicked}
+                />
+              </div>
+
+              <div className="chat-composer__inputWrap">
+                <input
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder={activeConv ? "Digite sua mensagem..." : "Selecione uma conversa..."}
+                  className="chat-input chat-input--composer"
+                  disabled={!activeConv || sending}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      void sendMessage();
+                    }
+                  }}
+                />
+
+                {emojiOpen ? (
+                  <div className="chat-emojiPicker" onClick={(e) => e.stopPropagation()}>
+                    {EMOJIS.map((emoji) => (
+                      <button
+                        key={emoji}
+                        className="chat-emojiBtn"
+                        onClick={() => setText((prev) => prev + emoji)}
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
+              <button
+                className="chat-sendBtn"
+                onClick={() => void sendMessage()}
+                disabled={!activeConv || sending || (!text.trim() && !attachmentFile)}
+              >
+                {sending ? "Enviando..." : "Enviar"}
+              </button>
+            </div>
           </div>
         </main>
       </div>
 
-      {pickerOpen && (
-        <div
-          onClick={() => setPickerOpen(false)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.45)",
-            display: "grid",
-            placeItems: "center",
-            padding: 16,
-            zIndex: 50,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(560px, 100%)",
-              maxHeight: "min(680px, 90vh)",
-              display: "flex",
-              flexDirection: "column",
-              borderRadius: 18,
-              border: `1px solid ${border}`,
-              background: cardBg,
-              color: fg,
-              overflow: "hidden",
-            }}
-          >
-            <div style={{ padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1px solid ${border}` }}>
-              <div style={{ fontWeight: 900 }}>Nova conversa</div>
-              <button
-                onClick={() => setPickerOpen(false)}
-                style={{ borderRadius: 10, border: `1px solid ${border}`, background: "transparent", color: fg, padding: "8px 10px", cursor: "pointer" }}
-              >
-                Fechar
+      {pickerOpen ? (
+        <div className="chat-modalBackdrop" onClick={() => setPickerOpen(false)}>
+          <div className="chat-modal chat-modal--wide" onClick={(e) => e.stopPropagation()}>
+            <div className="chat-modal__header">
+              <div className="chat-modal__title">Nova conversa</div>
+              <button className="chat-iconBtn" onClick={() => setPickerOpen(false)}>
+                <CloseIcon />
               </button>
             </div>
 
-            <div style={{ padding: 12, display: "flex", gap: 10, borderBottom: `1px solid ${border}` }}>
+            <div className="chat-modal__controls">
               <input
+                className="chat-input"
                 value={userSearch}
                 onChange={(e) => setUserSearch(e.target.value)}
-                placeholder="Buscar por nome ou @username"
-                style={{
-                  flex: 1,
-                  padding: "12px 12px",
-                  borderRadius: 12,
-                  border: `1px solid ${inputBorder}`,
-                  background: inputBg,
-                  color: fg,
-                  outline: "none",
-                }}
+                placeholder="Buscar nome, email, ramal, empresa ou setor"
               />
-              <button
-                onClick={() => loadUsers()}
-                style={{
-                  padding: "12px 14px",
-                  borderRadius: 12,
-                  border: `1px solid ${border}`,
-                  background: primary,
-                  color: "#fff",
-                  fontWeight: 900,
-                  cursor: "pointer",
-                }}
-                title="Recarregar usuários"
+
+              <select
+                className="chat-select"
+                value={userCompanyFilter}
+                onChange={(e) => setUserCompanyFilter(e.target.value)}
               >
-                Atualizar
-              </button>
+                <option value="">Todas as empresas</option>
+                {companyOptions.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                className="chat-select"
+                value={userDepartmentFilter}
+                onChange={(e) => setUserDepartmentFilter(e.target.value)}
+              >
+                <option value="">Todos os setores</option>
+                {departmentOptions.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
             </div>
 
-            <div style={{ padding: 12, overflow: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div className="chat-modal__body">
               {loadingUsers ? (
-                <div style={{ opacity: 0.8 }}>Carregando usuários…</div>
+                <div className="chat-empty">Carregando colaboradores…</div>
               ) : pickerError ? (
-                <div style={{ color: "#ff8a8a" }}>{pickerError}</div>
-              ) : filteredUsers.length === 0 ? (
-                <div style={{ opacity: 0.8 }}>Nenhum usuário encontrado.</div>
+                <div className="chat-error">{pickerError}</div>
+              ) : groupedUsers.length === 0 ? (
+                <div className="chat-empty">Nenhum colaborador encontrado.</div>
               ) : (
-                filteredUsers.map((u) => (
-                  <button
-                    key={u.id}
-                    onClick={() => startDirect(u.id)}
-                    style={{
-                      border: `1px solid ${border}`,
-                      background: theme === "dark" ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.75)",
-                      color: fg,
-                      borderRadius: 14,
-                      padding: 12,
-                      cursor: "pointer",
-                      textAlign: "left",
-                    }}
-                  >
-                    <div style={{ fontWeight: 900 }}>{u.name}</div>
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>@{u.username}</div>
-                  </button>
+                groupedUsers.map((group) => (
+                  <div key={`${group.company}-${group.department}`} className="chat-userGroup">
+                    <div className="chat-userGroup__header">
+                      <div className="chat-userGroup__company">{group.company}</div>
+                      <div className="chat-userGroup__department">{group.department}</div>
+                    </div>
+
+                    <div className="chat-userGroup__list">
+                      {group.users.map((user) => (
+                        <div key={user.id} className="chat-userRow">
+                          <div className="chat-userRow__main">
+                            <div className="chat-userRow__name">{user.name}</div>
+                            <div className="chat-userRow__meta">
+                              <span>{user.email || "Sem e-mail"}</span>
+                              <span>{user.extension ? `Ramal: ${user.extension}` : "Sem ramal"}</span>
+                            </div>
+                          </div>
+
+                          <div className="chat-userRow__actions">
+                            {user.email ? (
+                              <button
+                                className="chat-iconBtn chat-iconBtn--sm"
+                                onClick={() => copyText(user.email ?? "")}
+                                title="Copiar e-mail"
+                              >
+                                <CopyIcon />
+                              </button>
+                            ) : null}
+
+                            <button className="chat-primaryBtn" onClick={() => void startDirect(user.id)}>
+                              Abrir chat
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 ))
               )}
             </div>
-
-            <div style={{ padding: 12, borderTop: `1px solid ${border}`, fontSize: 12, opacity: 0.8 }}>
-              * Abrir conversa aqui cria (ou reutiliza) uma conversa direta.
-            </div>
           </div>
         </div>
-      )}
+      ) : null}
+
+      {profileOpen ? (
+        <div className="chat-modalBackdrop" onClick={() => setProfileOpen(false)}>
+          <div className="chat-profileDrawer" onClick={(e) => e.stopPropagation()}>
+            <div className="chat-profileDrawer__header">
+              <div className="chat-profileDrawer__title">Dados do contato</div>
+              <button className="chat-iconBtn" onClick={() => setProfileOpen(false)}>
+                <CloseIcon />
+              </button>
+            </div>
+
+            {profileLoading ? (
+              <div className="chat-profileDrawer__body">
+                <div className="chat-empty">Carregando dados do contato…</div>
+              </div>
+            ) : profileData ? (
+              <div className="chat-profileDrawer__body">
+                <div className="chat-contactCard">
+                  <div className="chat-avatar chat-avatar--xl">
+                    {toAbsoluteUrl(profileData.avatarUrl) ? (
+                      <img src={toAbsoluteUrl(profileData.avatarUrl) ?? ""} alt={profileData.name} />
+                    ) : (
+                      <span>{profileData.name.slice(0, 1).toUpperCase()}</span>
+                    )}
+                  </div>
+
+                  <div className="chat-contactCard__name">{profileData.name}</div>
+                  <div className="chat-contactCard__sub">@{profileData.username}</div>
+
+                  <div className="chat-contactCard__info">
+                    <div>{profileData.email || "Sem e-mail"}</div>
+                    <div>{profileData.extension ? `Ramal: ${profileData.extension}` : "Sem ramal"}</div>
+                    <div>{profileData.company?.name ?? "Sem empresa"}</div>
+                    <div>{profileData.department?.name ?? "Sem setor"}</div>
+                  </div>
+                </div>
+
+                <div className="chat-sectionTitle">Mensagens favoritadas nesta conversa</div>
+                <div className="chat-favoritesList">
+                  {!favoriteMessages.length ? (
+                    <div className="chat-empty">Nenhuma favorita.</div>
+                  ) : (
+                    favoriteMessages.map((msg) => (
+                      <div key={msg.id} className="chat-favoriteCard">
+                        <div className="chat-favoriteCard__top">
+                          <span>{msg.sender?.name ?? "Mensagem"}</span>
+                          <span>{fmtDateTime(msg.createdAt)}</span>
+                        </div>
+                        <div className="chat-favoriteCard__body">
+                          {msg.body?.trim() ||
+                            (msg.contentType === "IMAGE"
+                              ? "Imagem"
+                              : msg.contentType === "FILE"
+                              ? msg.attachmentName || "Arquivo"
+                              : "Mensagem")}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="chat-sectionTitle">Mídia e documentos</div>
+
+                <div className="chat-modeToggle chat-modeToggle--block">
+                  <button
+                    className={`chat-modeToggle__btn ${profileMediaTab === "image" ? "is-active" : ""}`}
+                    onClick={() => setProfileMediaTab("image")}
+                  >
+                    Mídia
+                  </button>
+                  <button
+                    className={`chat-modeToggle__btn ${profileMediaTab === "file" ? "is-active" : ""}`}
+                    onClick={() => setProfileMediaTab("file")}
+                  >
+                    Documentos
+                  </button>
+                </div>
+
+                <div className="chat-mediaGrid">
+                  {profileMediaLoading ? (
+                    <div className="chat-empty">Carregando…</div>
+                  ) : profileMediaItems.length === 0 ? (
+                    <div className="chat-empty">Nada encontrado.</div>
+                  ) : profileMediaTab === "image" ? (
+                    profileMediaItems.map((item) => (
+                      <a
+                        key={item.id}
+                        href={toAbsoluteUrl(item.attachmentUrl) ?? "#"}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="chat-mediaThumb"
+                      >
+                        <img src={toAbsoluteUrl(item.attachmentUrl) ?? ""} alt={item.attachmentName ?? "imagem"} />
+                      </a>
+                    ))
+                  ) : (
+                    profileMediaItems.map((item) => (
+                      <a
+                        key={item.id}
+                        href={toAbsoluteUrl(item.attachmentUrl) ?? "#"}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="chat-fileCard"
+                      >
+                        <div className="chat-fileCard__icon">
+                          <FileIcon />
+                        </div>
+                        <div className="chat-fileCard__text">
+                          <div className="chat-fileCard__name">{item.attachmentName ?? "Arquivo"}</div>
+                          <div className="chat-fileCard__meta">{fmtDateTime(item.createdAt)}</div>
+                        </div>
+                      </a>
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="chat-profileDrawer__body">
+                <div className="chat-empty">Não foi possível carregar os dados.</div>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

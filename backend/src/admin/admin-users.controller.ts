@@ -20,9 +20,6 @@ import { AdminJwtAuthGuard } from '../admin-auth/admin-jwt-auth.guard';
 export class AdminUsersController {
   constructor(private readonly prisma: PrismaService) {}
 
-  // =========================
-  // CREATE
-  // =========================
   @Post()
   async createUser(
     @Body()
@@ -31,11 +28,9 @@ export class AdminUsersController {
       name: string;
       password: string;
       mustChangePassword?: boolean;
-
-      // ✅ novos
       email?: string | null;
       extension?: string | null;
-
+      avatarUrl?: string | null;
       companyId?: string | null;
       departmentId?: string | null;
     },
@@ -49,10 +44,9 @@ export class AdminUsersController {
 
     const companyId = body?.companyId ? String(body.companyId).trim() : null;
     const departmentId = body?.departmentId ? String(body.departmentId).trim() : null;
-
-    // ✅ email/ramal
     const email = body?.email ? String(body.email).trim() : null;
     const extension = body?.extension ? String(body.extension).trim() : null;
+    const avatarUrl = body?.avatarUrl ? String(body.avatarUrl).trim() : null;
 
     if (!username || username.length < 3) throw new BadRequestException('Username inválido (mín. 3)');
     if (!name || name.length < 2) throw new BadRequestException('Nome inválido (mín. 2)');
@@ -61,11 +55,11 @@ export class AdminUsersController {
     const exists = await this.prisma.user.findUnique({ where: { username } });
     if (exists) throw new BadRequestException('Username já existe');
 
-    // valida IDs (se vierem)
     if (companyId) {
       const c = await this.prisma.company.findUnique({ where: { id: companyId } });
       if (!c) throw new BadRequestException('companyId inválido');
     }
+
     if (departmentId) {
       const d = await this.prisma.department.findUnique({ where: { id: departmentId } });
       if (!d) throw new BadRequestException('departmentId inválido');
@@ -82,20 +76,17 @@ export class AdminUsersController {
         mustChangePassword,
         companyId,
         departmentId,
-
-        // ✅ grava email/ramal
         email,
         extension,
-      } as any,
+        avatarUrl,
+      },
       select: {
         id: true,
         username: true,
         name: true,
-
-        // ✅ retorna email/ramal
         email: true,
         extension: true,
-
+        avatarUrl: true,
         isActive: true,
         mustChangePassword: true,
         createdAt: true,
@@ -104,23 +95,18 @@ export class AdminUsersController {
         departmentId: true,
         company: { select: { id: true, name: true } },
         department: { select: { id: true, name: true } },
-      } as any,
+      },
     });
 
     return { ok: true, user };
   }
 
-  // =========================
-  // LIST (busca + paginação + filtros)
-  // =========================
   @Get()
   async listUsers(
     @Query('q') q?: string,
-    @Query('active') active?: string, // "true" | "false" | undefined
+    @Query('active') active?: string,
     @Query('page') pageStr?: string,
     @Query('pageSize') pageSizeStr?: string,
-
-    // ✅ filtros
     @Query('companyId') companyId?: string,
     @Query('departmentId') departmentId?: string,
   ) {
@@ -136,7 +122,6 @@ export class AdminUsersController {
 
     if (companyIdTrim) and.push({ companyId: companyIdTrim });
     if (departmentIdTrim) and.push({ departmentId: departmentIdTrim });
-
     if (active === 'true') and.push({ isActive: true });
     if (active === 'false') and.push({ isActive: false });
 
@@ -144,7 +129,6 @@ export class AdminUsersController {
     if (and.length) where.AND = and;
 
     if (qTrim) {
-      // ✅ inclui email/ramal na busca também
       where.OR = [
         { username: { contains: qTrim, mode: 'insensitive' } },
         { name: { contains: qTrim, mode: 'insensitive' } },
@@ -164,11 +148,9 @@ export class AdminUsersController {
           id: true,
           username: true,
           name: true,
-
-          // ✅ retorna email/ramal
           email: true,
           extension: true,
-
+          avatarUrl: true,
           isActive: true,
           mustChangePassword: true,
           createdAt: true,
@@ -177,7 +159,7 @@ export class AdminUsersController {
           departmentId: true,
           company: { select: { id: true, name: true } },
           department: { select: { id: true, name: true } },
-        } as any,
+        },
       }),
     ]);
 
@@ -190,9 +172,6 @@ export class AdminUsersController {
     };
   }
 
-  // =========================
-  // UPDATE (dados)
-  // =========================
   @Patch(':id')
   async updateUser(
     @Param('id') id: string,
@@ -200,11 +179,9 @@ export class AdminUsersController {
     body: Partial<{
       username: string;
       name: string;
-
-      // ✅ novos
       email: string | null;
       extension: string | null;
-
+      avatarUrl: string | null;
       isActive: boolean;
       mustChangePassword: boolean;
       companyId: string | null;
@@ -231,14 +208,16 @@ export class AdminUsersController {
       data.name = name;
     }
 
-    // ✅ salva email/ramal
     if (body.email !== undefined) {
-      const v = body.email ? String(body.email).trim() : null;
-      data.email = v;
+      data.email = body.email ? String(body.email).trim() : null;
     }
+
     if (body.extension !== undefined) {
-      const v = body.extension ? String(body.extension).trim() : null;
-      data.extension = v;
+      data.extension = body.extension ? String(body.extension).trim() : null;
+    }
+
+    if (body.avatarUrl !== undefined) {
+      data.avatarUrl = body.avatarUrl ? String(body.avatarUrl).trim() : null;
     }
 
     if (body.companyId !== undefined) {
@@ -269,11 +248,9 @@ export class AdminUsersController {
         id: true,
         username: true,
         name: true,
-
-        // ✅ retorna email/ramal
         email: true,
         extension: true,
-
+        avatarUrl: true,
         isActive: true,
         mustChangePassword: true,
         createdAt: true,
@@ -282,15 +259,12 @@ export class AdminUsersController {
         departmentId: true,
         company: { select: { id: true, name: true } },
         department: { select: { id: true, name: true } },
-      } as any,
+      },
     });
 
     return { ok: true, user: updated };
   }
 
-  // =========================
-  // SET PASSWORD
-  // =========================
   @Put(':id/password')
   async setUserPassword(
     @Param('id') id: string,
@@ -313,10 +287,9 @@ export class AdminUsersController {
         id: true,
         username: true,
         name: true,
-
         email: true,
         extension: true,
-
+        avatarUrl: true,
         isActive: true,
         mustChangePassword: true,
         createdAt: true,
@@ -325,15 +298,12 @@ export class AdminUsersController {
         departmentId: true,
         company: { select: { id: true, name: true } },
         department: { select: { id: true, name: true } },
-      } as any,
+      },
     });
 
     return { ok: true, user: updated };
   }
 
-  // =========================
-  // DELETE
-  // =========================
   @Delete(':id')
   async deleteUser(@Param('id') id: string) {
     if (!id) throw new BadRequestException('ID inválido');

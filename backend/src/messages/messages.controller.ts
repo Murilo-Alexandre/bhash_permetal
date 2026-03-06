@@ -1,24 +1,48 @@
-// C:\dev\bhash\backend\src\messages\messages.controller.ts
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards, BadRequestException } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+  BadRequestException,
+  UseInterceptors,
+  UploadedFile,
+} from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { MessagesService } from './messages.service';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import * as path from 'path';
+import { ChatEventsService } from '../chat/chat-events.service';
+
+function safeAttachmentExt(original: string) {
+  const ext = path.extname(original || '').toLowerCase();
+  return ext || '';
+}
 
 @Controller()
 @UseGuards(JwtAuthGuard)
 export class MessagesController {
-  constructor(private readonly messages: MessagesService) {}
+  constructor(
+    private readonly messages: MessagesService,
+    private readonly events: ChatEventsService,
+  ) {}
 
   @Get('conversations/:id/messages')
   list(
     @Req() req: any,
     @Param('id') conversationId: string,
     @Query('cursor') cursor?: string,
-    @Query('take') take?: string
+    @Query('take') take?: string,
   ) {
     return this.messages.list(req.user.sub, conversationId, cursor, take);
   }
 
-  // ✅ NOVO: contexto ao redor de uma mensagem (para “Abrir conversa completa” + scroll)
   @Get('conversations/:id/messages/around')
   around(
     @Req() req: any,
@@ -30,8 +54,97 @@ export class MessagesController {
     return this.messages.around(req.user.sub, conversationId, messageId, take);
   }
 
+  @Get('conversations/:id/search')
+  search(
+    @Req() req: any,
+    @Param('id') conversationId: string,
+    @Query('q') q?: string,
+    @Query('take') take?: string,
+  ) {
+    return this.messages.search(req.user.sub, conversationId, q, take);
+  }
+
+  @Get('conversations/:id/media')
+  media(
+    @Req() req: any,
+    @Param('id') conversationId: string,
+    @Query('kind') kind?: 'image' | 'file',
+    @Query('take') take?: string,
+  ) {
+    return this.messages.listMedia(req.user.sub, conversationId, kind, take);
+  }
+
   @Post('conversations/:id/messages')
-  send(@Req() req: any, @Param('id') conversationId: string, @Body() body: { body: string }) {
-    return this.messages.send(req.user.sub, conversationId, body.body);
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: (_req, file, cb) => {
+          const isImage = /^image\//i.test(file.mimetype);
+          const folder = isImage ? 'chat-images' : 'chat-files';
+          cb(null, path.join(process.cwd(), 'public', 'uploads', folder));
+        },
+        filename: (_req, file, cb) => {
+          const ext = safeAttachmentExt(file.originalname);
+          cb(null, `msg_${Date.now()}${ext}`);
+        },
+      }),
+      limits: { fileSize: 25 * 1024 * 1024 },
+    }),
+  )
+  async send(
+    @Req() req: any,
+    @Param('id') conversationId: string,
+    @Body()
+    body: {
+      body?: string;
+      replyToId?: string;
+      uploadMode?: 'image' | 'file';
+    },
+    @UploadedFile() file?: Express.Multer.File,
+  ) {
+    const msg = await this.messages.send({
+      userId: req.user.sub,
+      conversationId,
+      body: body.body,
+      replyToId: body.replyToId ?? null,
+      file,
+      uploadMode: body.uploadMode ?? null,
+    });
+
+    this.events.emitMessageNew(conversationId, msg);
+
+    return { ok: true, message: msg };
+  }
+
+  @Patch('messages/:id/favorite')
+  async toggleFavorite(
+    @Req() req: any,
+    @Param('id') messageId: string,
+    @Body() body: { value: boolean },
+  ) {
+    const result = await this.messages.toggleFavorite(req.user.sub, messageId, !!body?.value);
+    this.events.emitMessageUpdated(result.conversationId, result.message);
+    return { ok: true, message: result.message };
+  }
+
+  @Post('messages/:id/reaction')
+  async setReaction(
+    @Req() req: any,
+    @Param('id') messageId: string,
+    @Body() body: { emoji?: string | null },
+  ) {
+    const result = await this.messages.setReaction(req.user.sub, messageId, body?.emoji ?? null);
+    this.events.emitMessageUpdated(result.conversationId, result.message);
+    return { ok: true, message: result.message };
+  }
+
+  @Delete('messages/:id')
+  async remove(@Req() req: any, @Param('id') messageId: string) {
+    const result = await this.messages.remove(req.user.sub, messageId);
+    this.events.emitMessageDeleted(result.conversationId, {
+      id: result.messageId,
+      deletedAt: result.deletedAt,
+    });
+    return { ok: true };
   }
 }
