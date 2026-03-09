@@ -1254,3 +1254,16 @@ textarea {
   background: color-mix(in srgb, var(--card-bg) 75%, transparent);
   word-break: break-word;
 }
+.chat-layout { height: calc(100vh - 78px); }
+.chat-sidebar { height: 100%; }
+.chat-sidebar__header { position: sticky; top: 0; z-index: 2; background: var(--card-bg); }
+.chat-main { height: 100%; min-height: 0; }
+.chat-mainHeader { position: sticky; top: 0; z-index: 2; }
+.chat-content { flex: 1; min-height: 0; }
+.chat-messageList { height: 100%; overflow: auto; }
+.chat-composerWrap { position: sticky; bottom: 0; z-index: 3; }
+.chat-unreadBadge { margin-left: auto; background: #21c063; color:#fff; border-radius:999px; font-size:12px; min-width:22px; height:22px; display:grid; place-items:center; padding:0 6px; }
+.chat-jumpNewBtn { position:absolute; right:24px; bottom:90px; border:0; background: var(--bhash-primary); color:#fff; border-radius:999px; padding:8px 12px; z-index:20; }
+.chat-multiDeleteBar { display:flex; align-items:center; gap:8px; margin:8px 0; }
+.chat-userGroup__department { margin: 6px 0 4px 18px; font-weight: 700; color: var(--muted); }
+.chat-main { position: relative; }

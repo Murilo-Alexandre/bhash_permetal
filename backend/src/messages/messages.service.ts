@@ -65,6 +65,10 @@ export class MessagesService {
           },
         },
       },
+      hiddenForUsers: {
+        where: { userId: currentUserId },
+        select: { id: true },
+      },
     };
   }
 
@@ -81,12 +85,12 @@ export class MessagesService {
       createdAt: msg.createdAt,
       conversationId: msg.conversationId,
       senderId: msg.senderId,
-      body: msg.deletedAt ? 'Mensagem apagada' : (msg.body ?? ''),
+      body: msg.body ?? '',
       contentType: msg.contentType,
-      attachmentUrl: msg.deletedAt ? null : msg.attachmentUrl,
-      attachmentName: msg.deletedAt ? null : msg.attachmentName,
-      attachmentMime: msg.deletedAt ? null : msg.attachmentMime,
-      attachmentSize: msg.deletedAt ? null : msg.attachmentSize,
+      attachmentUrl: msg.attachmentUrl,
+      attachmentName: msg.attachmentName,
+      attachmentMime: msg.attachmentMime,
+      attachmentSize: msg.attachmentSize,
       replyToId: msg.replyToId,
       deletedAt: msg.deletedAt,
       sender: msg.sender,
@@ -172,7 +176,12 @@ export class MessagesService {
     const pageSize = Math.min(Math.max(parseInt(take ?? '30', 10) || 30, 1), 100);
 
     const rows = await this.prisma.message.findMany({
-      where: { conversationId },
+      where: {
+        conversationId,
+        hiddenForUsers: {
+          none: { userId },
+        },
+      },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: pageSize,
       ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
@@ -186,12 +195,12 @@ export class MessagesService {
       createdAt: msg.createdAt,
       conversationId: msg.conversationId,
       senderId: msg.senderId,
-      body: msg.deletedAt ? 'Mensagem apagada' : (msg.body ?? ''),
+      body: msg.body ?? '',
       contentType: msg.contentType,
-      attachmentUrl: msg.deletedAt ? null : msg.attachmentUrl,
-      attachmentName: msg.deletedAt ? null : msg.attachmentName,
-      attachmentMime: msg.deletedAt ? null : msg.attachmentMime,
-      attachmentSize: msg.deletedAt ? null : msg.attachmentSize,
+      attachmentUrl: msg.attachmentUrl,
+      attachmentName: msg.attachmentName,
+      attachmentMime: msg.attachmentMime,
+      attachmentSize: msg.attachmentSize,
       replyToId: msg.replyToId,
       deletedAt: msg.deletedAt,
       sender: msg.sender,
@@ -218,9 +227,19 @@ export class MessagesService {
       throw new BadRequestException('Mensagem âncora não encontrada nesta conversa');
     }
 
+    const hiddenAnchor = await this.prisma.messageVisibility.findUnique({
+      where: { messageId_userId: { messageId, userId } },
+      select: { id: true },
+    });
+
+    if (hiddenAnchor) {
+      throw new BadRequestException('Mensagem âncora não encontrada nesta conversa');
+    }
+
     const before = await this.prisma.message.findMany({
       where: {
         conversationId,
+        hiddenForUsers: { none: { userId } },
         OR: [
           { createdAt: { lt: anchor.createdAt } },
           { AND: [{ createdAt: { equals: anchor.createdAt } }, { id: { lt: anchor.id } }] },
@@ -234,6 +253,7 @@ export class MessagesService {
     const after = await this.prisma.message.findMany({
       where: {
         conversationId,
+        hiddenForUsers: { none: { userId } },
         OR: [
           { createdAt: { gt: anchor.createdAt } },
           { AND: [{ createdAt: { equals: anchor.createdAt } }, { id: { gt: anchor.id } }] },
@@ -263,6 +283,7 @@ export class MessagesService {
       where: {
         conversationId,
         deletedAt: null,
+        hiddenForUsers: { none: { userId } },
         OR: [
           { body: { contains: term, mode: 'insensitive' } },
           { attachmentName: { contains: term, mode: 'insensitive' } },
@@ -403,28 +424,53 @@ export class MessagesService {
     if (!message) throw new BadRequestException('Mensagem não encontrada');
     await this.assertMember(userId, message.conversationId);
 
-    if (message.senderId !== userId) {
-      throw new ForbiddenException('Você só pode apagar suas próprias mensagens');
-    }
-
-    if (!message.deletedAt) {
-      await this.prisma.message.update({
-        where: { id: messageId },
-        data: {
-          deletedAt: new Date(),
-          body: null,
-          attachmentUrl: null,
-          attachmentName: null,
-          attachmentMime: null,
-          attachmentSize: null,
-        },
-      });
-    }
+    await this.prisma.messageVisibility.upsert({
+      where: { messageId_userId: { messageId, userId } },
+      update: { hiddenAt: new Date() },
+      create: { messageId, userId },
+    });
 
     return {
       conversationId: message.conversationId,
       messageId,
       deletedAt: new Date().toISOString(),
     };
+  }
+
+  async removeMany(userId: string, messageIds: string[]) {
+    if (!messageIds.length) return { conversationId: null as string | null, messageIds: [] as string[] };
+
+    const rows = await this.prisma.message.findMany({
+      where: { id: { in: messageIds } },
+      select: { id: true, conversationId: true },
+    });
+
+    if (!rows.length) return { conversationId: null as string | null, messageIds: [] as string[] };
+
+    const conversationId = rows[0].conversationId;
+    if (rows.some((r) => r.conversationId !== conversationId)) {
+      throw new BadRequestException('As mensagens devem ser da mesma conversa');
+    }
+
+    await this.assertMember(userId, conversationId);
+
+    await this.prisma.messageVisibility.createMany({
+      data: rows.map((row) => ({ messageId: row.id, userId })),
+      skipDuplicates: true,
+    });
+
+    return { conversationId, messageIds: rows.map((r) => r.id) };
+  }
+
+  async clearConversation(userId: string, conversationId: string) {
+    await this.assertMember(userId, conversationId);
+
+    await this.prisma.conversationUserState.upsert({
+      where: { conversationId_userId: { conversationId, userId } },
+      update: { clearedAt: new Date(), hidden: false },
+      create: { conversationId, userId, clearedAt: new Date(), hidden: false },
+    });
+
+    return { conversationId };
   }
 }

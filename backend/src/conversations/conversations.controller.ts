@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Req, UseGuards, Query } from '@nestjs/common';
+import { Body, Controller, Get, Post, Req, UseGuards, Query, Patch, Delete, Param } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ConversationsService } from './conversations.service';
 
@@ -16,4 +16,15 @@ export class ConversationsController {
   getOrCreateDirect(@Req() req: any, @Body() body: { otherUserId: string }) {
     return this.conversations.getOrCreateDirect(req.user.sub, body.otherUserId);
   }
+
+  @Patch(':id/read')
+  markAsRead(@Req() req: any, @Param('id') conversationId: string) {
+    return this.conversations.markAsRead(req.user.sub, conversationId);
+  }
+
+  @Delete(':id')
+  hideConversation(@Req() req: any, @Param('id') conversationId: string) {
+    return this.conversations.hideConversation(req.user.sub, conversationId);
+  }
 }
+

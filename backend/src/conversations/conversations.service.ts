@@ -79,6 +79,12 @@ export class ConversationsService {
       },
     });
 
+    await this.prisma.conversationUserState.upsert({
+      where: { conversationId_userId: { conversationId: conv.id, userId: myId } },
+      update: { hidden: false },
+      create: { conversationId: conv.id, userId: myId, hidden: false },
+    });
+
     return { ok: true, conversation: conv };
   }
 
@@ -88,6 +94,7 @@ export class ConversationsService {
     const rows = await this.prisma.conversation.findMany({
       where: {
         OR: [{ userAId: myId }, { userBId: myId }],
+        states: { none: { userId: myId, hidden: true } },
         ...(query
           ? {
               OR: [
@@ -101,7 +108,6 @@ export class ConversationsService {
             }
           : {}),
       },
-      orderBy: { updatedAt: 'desc' },
       include: {
         userA: {
           select: {
@@ -127,32 +133,87 @@ export class ConversationsService {
             department: { select: { id: true, name: true } },
           },
         },
-        messages: {
+        states: {
+          where: { userId: myId },
+          select: { lastReadAt: true, clearedAt: true },
           take: 1,
-          orderBy: { createdAt: 'desc' },
-          select: this.messageSelect(myId),
         },
       },
     });
 
-    const items = rows.map((conv) => {
-      const otherUser = conv.userA.id === myId ? conv.userB : conv.userA;
-      const lastMessage = conv.messages[0] ?? null;
+    const items = await Promise.all(
+      rows.map(async (conv) => {
+        const otherUser = conv.userA.id === myId ? conv.userB : conv.userA;
+        const state = conv.states[0] ?? null;
 
-      return {
-        id: conv.id,
-        createdAt: conv.createdAt,
-        updatedAt: conv.updatedAt,
-        otherUser,
-        lastMessage: lastMessage
-          ? {
-              ...lastMessage,
-              isFavorited: lastMessage.favorites.length > 0,
-            }
-          : null,
-      };
-    });
+        const lastMessage = await this.prisma.message.findFirst({
+          where: {
+            conversationId: conv.id,
+            hiddenForUsers: { none: { userId: myId } },
+            ...(state?.clearedAt ? { createdAt: { gt: state.clearedAt } } : {}),
+          },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          select: this.messageSelect(myId),
+        });
+
+        const unreadCount = await this.prisma.message.count({
+          where: {
+            conversationId: conv.id,
+            senderId: { not: myId },
+            hiddenForUsers: { none: { userId: myId } },
+            ...(state?.lastReadAt ? { createdAt: { gt: state.lastReadAt } } : {}),
+            ...(state?.clearedAt ? { createdAt: { gt: state.clearedAt } } : {}),
+          },
+        });
+
+        return {
+          id: conv.id,
+          createdAt: conv.createdAt,
+          updatedAt: lastMessage?.createdAt ?? conv.updatedAt,
+          otherUser,
+          unreadCount,
+          lastMessage: lastMessage
+            ? {
+                ...lastMessage,
+                isFavorited: lastMessage.favorites.length > 0,
+              }
+            : null,
+        };
+      }),
+    );
+
+    items.sort(
+      (a, b) => new Date(b.updatedAt ?? b.createdAt ?? 0).getTime() - new Date(a.updatedAt ?? a.createdAt ?? 0).getTime(),
+    );
 
     return { ok: true, items };
+  }
+
+  async markAsRead(myId: string, conversationId: string) {
+    const conv = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, OR: [{ userAId: myId }, { userBId: myId }] },
+      select: { id: true },
+    });
+
+    if (!conv) throw new BadRequestException('Conversa não encontrada');
+
+    await this.prisma.conversationUserState.upsert({
+      where: { conversationId_userId: { conversationId, userId: myId } },
+      update: { lastReadAt: new Date(), hidden: false },
+      create: { conversationId, userId: myId, lastReadAt: new Date(), hidden: false },
+    });
+
+    return { ok: true };
+  }
+
+  async hideConversation(myId: string, conversationId: string) {
+    await this.markAsRead(myId, conversationId);
+
+    await this.prisma.conversationUserState.update({
+      where: { conversationId_userId: { conversationId, userId: myId } },
+      data: { hidden: true },
+    });
+
+    return { ok: true };
   }
 }

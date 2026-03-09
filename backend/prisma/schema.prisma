@@ -100,6 +100,7 @@ model Conversation {
   userB     User @relation("ConversationUserB", fields: [userBId], references: [id])
 
   messages  Message[]
+  states    ConversationUserState[]
 
   @@unique([userAId, userBId])
   @@index([updatedAt])
@@ -132,11 +133,44 @@ model Message {
 
   favorites      MessageFavorite[]
   reactions      MessageReaction[]
+  hiddenForUsers MessageVisibility[]
 
   @@index([conversationId, createdAt])
   @@index([replyToId])
   @@index([senderId])
   @@map("messages")
+}
+
+model ConversationUserState {
+  id             String   @id @default(uuid())
+  conversationId String
+  userId         String
+  hidden         Boolean  @default(false)
+  clearedAt      DateTime?
+  lastReadAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId, hidden])
+  @@map("conversation_user_states")
+}
+
+model MessageVisibility {
+  id        String   @id @default(uuid())
+  messageId String
+  userId    String
+  hiddenAt  DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([userId, hiddenAt])
+  @@map("message_visibility")
 }
 
 model MessageFavorite {
