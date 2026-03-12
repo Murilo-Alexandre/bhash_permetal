@@ -6,6 +6,7 @@ import { PassportModule } from '@nestjs/passport';
 import { AdminAuthController } from './admin-auth.controller';
 import { AdminAuthService } from './admin-auth.service';
 import { AdminJwtStrategy } from './admin-jwt.strategy';
+import { getOptionalJwtSecret } from '../common/security-config';
 
 @Module({
   imports: [
@@ -14,7 +15,7 @@ import { AdminJwtStrategy } from './admin-jwt.strategy';
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        secret: config.get<string>('JWT_SECRET') ?? 'dev-secret-change-me',
+        secret: getOptionalJwtSecret(config),
         signOptions: { expiresIn: '12h' },
       }),
     }),

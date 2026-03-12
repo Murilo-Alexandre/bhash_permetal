@@ -11,13 +11,21 @@ Aplicacao do usuario final (chat interno).
 
 ## Configuracao
 
-Opcional em desenvolvimento: criar `.env` com:
+Use o arquivo central `.env` na raiz do projeto:
 
 ```env
+# Recomendado em servidor interno com reverse proxy HTTPS:
+# VITE_API_BASE=/api
+# VITE_WS_PATH=/socket.io
+
+# Dev local sem proxy:
 VITE_API_BASE=http://localhost:3000
 ```
 
-Se nao definir, o frontend tenta resolver automaticamente para `<host-atual>:3000`.
+Se nao definir:
+
+- em `https://` (fora de localhost): usa `/api` automaticamente
+- em `http://`: usa `<host-atual>:3000`
 
 ## Instalar dependencias
 
@@ -32,6 +40,14 @@ npm run dev
 ```
 
 Porta padrao: `5173`.
+
+### Dev HTTPS (teste de PWA local)
+
+```bash
+npm run dev:https
+```
+
+Modo `https` usa `frontend/.env.https`.
 
 ## Build de producao
 

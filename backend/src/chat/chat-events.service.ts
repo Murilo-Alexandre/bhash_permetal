@@ -13,6 +13,10 @@ export class ChatEventsService {
     this.server?.to(`conv:${conversationId}`).emit('message:new', message);
   }
 
+  emitUserMessageNew(userId: string, message: unknown) {
+    this.server?.to(`user:${userId}`).emit('user:message:new', message);
+  }
+
   emitMessageUpdated(conversationId: string, message: unknown) {
     this.server?.to(`conv:${conversationId}`).emit('message:updated', message);
   }

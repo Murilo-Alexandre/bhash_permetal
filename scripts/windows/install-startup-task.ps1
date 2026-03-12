@@ -1,5 +1,5 @@
 param(
-  [string]$ProjectRoot = "C:\dev\bhash",
+  [string]$ProjectRoot = "",
   [string]$TaskName = "BHash-PM2-Resurrect",
   [string]$Pm2Home = "$env:USERPROFILE\.pm2",
   [switch]$ForceSystemStartup
@@ -7,6 +7,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
+
+if (-not $ProjectRoot) {
+  $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+}
 
 function Test-IsAdmin {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

@@ -15,3 +15,12 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     </ThemeProvider>
   </React.StrictMode>
 );
+
+const shouldRegisterServiceWorker =
+  "serviceWorker" in navigator && (import.meta.env.PROD || import.meta.env.VITE_ENABLE_SW_DEV === "true");
+
+if (shouldRegisterServiceWorker) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+  });
+}

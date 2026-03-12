@@ -1,8 +1,10 @@
-import 'dotenv/config';
 import * as argon2 from 'argon2';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
+import { loadProjectEnv } from '../src/common/project-env';
+
+loadProjectEnv();
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) throw new Error('DATABASE_URL não está definido no .env');

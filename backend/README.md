@@ -17,13 +17,24 @@ API principal do sistema.
 
 ## Configuracao
 
-Edite `backend/.env`:
+Use o arquivo central da raiz:
+
+```bash
+cd ..
+npm run env:init
+```
+
+Exemplo base:
 
 ```env
 DATABASE_URL=postgresql://bhash:bhashpass@localhost:5432/bhash
 JWT_SECRET=troque-por-uma-chave-forte
 CORS_ORIGINS=http://localhost:5173,http://localhost:5174,LAN
+CHAT_WEB_URL=http://localhost:5173
+DESKTOP_UPDATE_URL=https://updates.bhash.com/desktop/win
 ```
+
+O backend carrega automaticamente somente `.env` da raiz.
 
 ## Instalar dependencias
 

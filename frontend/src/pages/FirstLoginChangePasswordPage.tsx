@@ -4,7 +4,7 @@ import { useTheme } from "../theme";
 import { TopNav } from "../components/TopNav";
 
 export function FirstLoginChangePasswordPage({ onDone }: { onDone: () => void }) {
-  const { api, logout } = useAuth();
+  const { api, logoff } = useAuth();
   const { theme, toggleTheme, resolvedLogoUrl } = useTheme();
 
   const [password, setPassword] = useState("");
@@ -24,8 +24,9 @@ export function FirstLoginChangePasswordPage({ onDone }: { onDone: () => void })
       await api.put("/me/password", { password });
       setMsg("✅ Senha atualizada. Liberando acesso…");
       onDone();
-    } catch (e: any) {
-      setMsg(e?.response?.data?.message ?? "Falha ao atualizar senha");
+    } catch (e: unknown) {
+      const apiErr = e as { response?: { data?: { message?: string } } };
+      setMsg(apiErr.response?.data?.message ?? "Falha ao atualizar senha");
     } finally {
       setSaving(false);
     }
@@ -103,7 +104,7 @@ export function FirstLoginChangePasswordPage({ onDone }: { onDone: () => void })
             </button>
 
             <button
-              onClick={logout}
+              onClick={logoff}
               style={{
                 marginTop: 6,
                 padding: 12,
@@ -115,7 +116,7 @@ export function FirstLoginChangePasswordPage({ onDone }: { onDone: () => void })
                 cursor: "pointer",
               }}
             >
-              Sair
+              Logoff
             </button>
 
             {msg && <div style={{ marginTop: 6, fontSize: 13, color: "var(--muted)" }}>{msg}</div>}

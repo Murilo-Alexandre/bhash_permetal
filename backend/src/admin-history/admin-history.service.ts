@@ -1,4 +1,3 @@
-// C:\dev\bhash\backend\src\admin-history\admin-history.service.ts
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 

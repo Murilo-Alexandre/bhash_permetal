@@ -5,6 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MessagesService } from '../messages/messages.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ChatEventsService } from './chat-events.service';
+import { getOptionalJwtSecret } from '../common/security-config';
 
 @Global()
 @Module({
@@ -14,7 +15,7 @@ import { ChatEventsService } from './chat-events.service';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (cfg: ConfigService) => ({
-        secret: cfg.get<string>('JWT_SECRET') ?? 'devsecret',
+        secret: getOptionalJwtSecret(cfg),
       }),
     }),
   ],

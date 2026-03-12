@@ -5,10 +5,13 @@ const LOCALHOST_HOST_RE = /^(?:localhost|127\.0\.0\.1|::1|\[::1\])$/i;
 
 function resolveApiBase() {
   const envBase = import.meta.env.VITE_API_BASE?.trim();
-  const runtimeBase =
-    typeof window !== "undefined"
-      ? `${window.location.protocol}//${window.location.hostname}:3000`
-      : "http://localhost:3000";
+  const runtimeBase = (() => {
+    if (typeof window === "undefined") return "http://localhost:3000";
+    const isLocalhost = LOCALHOST_HOST_RE.test(window.location.hostname);
+    // Em HTTPS fora de localhost, assume reverse proxy interno em /api.
+    if (window.location.protocol === "https:" && !isLocalhost) return "/api";
+    return `${window.location.protocol}//${window.location.hostname}:3000`;
+  })();
 
   if (!envBase) return runtimeBase;
 

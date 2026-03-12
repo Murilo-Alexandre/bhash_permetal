@@ -84,6 +84,17 @@ type SearchHit = Message;
 
 type MediaItem = Message;
 
+type GroupedMessageRow =
+  | { kind: "sep"; label: string }
+  | { kind: "unread" }
+  | { kind: "msg"; value: Message };
+
+type DesktopNotificationTarget = {
+  conversationId: string;
+  messageId?: string | null;
+  at?: number;
+};
+
 type UserProfile = {
   id: string;
   username: string;
@@ -462,6 +473,14 @@ function messageSearchableText(msg: Partial<Message>) {
   return [msg.body ?? "", msg.attachmentName ?? ""].join(" ").trim();
 }
 
+function messageNotificationPreview(msg: Message) {
+  const body = msg.body?.trim();
+  if (body) return body.length > 120 ? `${body.slice(0, 117)}...` : body;
+  if (msg.contentType === "IMAGE") return "Imagem";
+  if (msg.contentType === "FILE") return msg.attachmentName ? `Arquivo: ${msg.attachmentName}` : "Arquivo";
+  return "Nova mensagem";
+}
+
 function HighlightText({
   text,
   query,
@@ -628,10 +647,33 @@ function SendIcon() {
   return (
     <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
       <path
-        d="M4 11.6 20.2 4.4c.9-.4 1.8.5 1.4 1.4L14.4 22c-.4.9-1.7.8-1.9-.2l-1.5-6.2-6.2-1.5c-1-.2-1.1-1.5-.2-1.9Z"
-        fill="currentColor"
+        d="M22 2 11 13"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
       />
-      <path d="m11 15 10-10" stroke="rgba(255,255,255,0.9)" strokeWidth="1.7" strokeLinecap="round" />
+      <path
+        d="M22 2 15 22l-4-9-9-4 20-7Z"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ArrowUpIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M6 15l6-6 6 6"
+        stroke="currentColor"
+        strokeWidth="2.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
@@ -712,7 +754,7 @@ function PinIcon({ filled = false }: { filled?: boolean }) {
 }
 
 export function ChatPage() {
-  const { logout, api, token } = useAuth();
+  const { logoff, api, token } = useAuth();
   const { theme, toggleTheme, resolvedLogoUrl } = useTheme();
 
   const [me, setMe] = useState<Me | null>(null);
@@ -760,6 +802,8 @@ export function ChatPage() {
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
   const [newMsgsCount, setNewMsgsCount] = useState(0);
   const [showJumpNew, setShowJumpNew] = useState(false);
+  const [unreadAnchorMessageId, setUnreadAnchorMessageId] = useState<string | null>(null);
+  const [showJumpUnread, setShowJumpUnread] = useState(false);
   const [avatarUploading, setAvatarUploading] = useState(false);
 
   const [profileOpen, setProfileOpen] = useState(false);
@@ -783,6 +827,7 @@ export function ChatPage() {
   const convListRef = useRef<HTMLDivElement | null>(null);
   const convPositionsRef = useRef<Map<string, number>>(new Map());
   const msgListRef = useRef<HTMLDivElement | null>(null);
+  const isMsgListNearBottomRef = useRef(true);
   const composerInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -790,6 +835,8 @@ export function ChatPage() {
   const searchDebounceRef = useRef<number | null>(null);
   const activeConvIdRef = useRef<string | null>(null);
   const meIdRef = useRef<string | null>(null);
+  const handledRealtimeMessageIdsRef = useRef<Set<string>>(new Set());
+  const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
   const imageViewerConvIdRef = useRef<string | null>(null);
   const imageViewerDragRef = useRef<{
     active: boolean;
@@ -840,8 +887,65 @@ export function ChatPage() {
   function scrollToBottom() {
     requestAnimationFrame(() => {
       const el = msgListRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (!el) return;
+      el.scrollTop = el.scrollHeight;
+      isMsgListNearBottomRef.current = true;
     });
+  }
+
+  function scrollToUnreadAnchor() {
+    requestAnimationFrame(() => {
+      const el = msgListRef.current;
+      if (!el || !unreadAnchorMessageId) return;
+      const unreadAnchor = el.querySelector<HTMLElement>("[data-unread-anchor='true']");
+      if (!unreadAnchor) return;
+      unreadAnchor.scrollIntoView({ behavior: "smooth", block: "start" });
+      window.setTimeout(() => {
+        const refreshedEl = msgListRef.current;
+        if (!refreshedEl) return;
+        const refreshedAnchor = refreshedEl.querySelector<HTMLElement>("[data-unread-anchor='true']");
+        if (!refreshedAnchor) return;
+        const listRect = refreshedEl.getBoundingClientRect();
+        const anchorRect = refreshedAnchor.getBoundingClientRect();
+        const isAbove = anchorRect.bottom < listRect.top + 2;
+        setShowJumpUnread(isAbove);
+      }, 280);
+    });
+  }
+
+  function resolveUnreadAnchorMessageId(items: Message[], unreadCount?: number | null) {
+    const count = Math.max(0, Number(unreadCount ?? 0));
+    if (!count || items.length === 0) return null;
+    const idx = Math.max(0, items.length - count);
+    return items[idx]?.id ?? null;
+  }
+
+  function syncUnreadJumpButton() {
+    const el = msgListRef.current;
+    if (!el || !unreadAnchorMessageId) {
+      setShowJumpUnread(false);
+      return;
+    }
+
+    const unreadAnchor = el.querySelector<HTMLElement>("[data-unread-anchor='true']");
+    if (!unreadAnchor) {
+      setShowJumpUnread(false);
+      return;
+    }
+
+    const listRect = el.getBoundingClientRect();
+    const anchorRect = unreadAnchor.getBoundingClientRect();
+    const isAbove = anchorRect.bottom < listRect.top + 2;
+    setShowJumpUnread(isAbove);
+  }
+
+  function messageListDistanceFromBottom(el: HTMLDivElement) {
+    return el.scrollHeight - (el.scrollTop + el.clientHeight);
+  }
+
+  function isMessageListNearBottom(el: HTMLDivElement | null, threshold = 140) {
+    if (!el) return true;
+    return messageListDistanceFromBottom(el) <= threshold;
   }
 
   function focusComposerInput() {
@@ -859,6 +963,136 @@ export function ChatPage() {
     setAttachmentPreviewUrl(null);
     if (imageInputRef.current) imageInputRef.current.value = "";
     if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function rememberNotifiedMessage(messageId: string) {
+    const store = notifiedMessageIdsRef.current;
+    store.add(messageId);
+    if (store.size > 300) {
+      const oldest = store.values().next().value;
+      if (oldest) store.delete(oldest);
+    }
+  }
+
+  async function notifyIncomingMessage(msg: Message) {
+    const myId = meIdRef.current;
+    if (!myId || msg.senderId === myId) return;
+    if (notifiedMessageIdsRef.current.has(msg.id)) return;
+
+    const pageVisible = document.visibilityState === "visible" && !document.hidden;
+    if (window.bhashDesktop?.isDesktop) {
+      try {
+        const state = await window.bhashDesktop.getWindowState();
+        const desktopVisible = state.isVisible && !state.isMinimized;
+        if (desktopVisible) return;
+      } catch {
+        if (pageVisible) return;
+      }
+    } else if (pageVisible) {
+      return;
+    }
+
+    const conv = conversationsRef.current.find((item) => item.id === msg.conversationId);
+    const title = msg.sender?.name || conv?.otherUser?.name || "Nova mensagem";
+    const body = messageNotificationPreview(msg);
+    rememberNotifiedMessage(msg.id);
+
+    if (window.bhashDesktop?.isDesktop) {
+      await window.bhashDesktop.notify({
+        title,
+        body,
+        playSound: true,
+        conversationId: msg.conversationId,
+        messageId: msg.id,
+      });
+      return;
+    }
+
+    if (!("Notification" in window)) return;
+    if (Notification.permission === "default") {
+      try {
+        await Notification.requestPermission();
+      } catch {
+        return;
+      }
+    }
+    if (Notification.permission !== "granted") return;
+
+    const notification = new Notification(title, { body });
+    notification.onclick = () => {
+      window.focus();
+      void openConversationById(msg.conversationId, msg.id);
+    };
+  }
+
+  function rememberHandledRealtimeMessage(messageId: string) {
+    const store = handledRealtimeMessageIdsRef.current;
+    store.add(messageId);
+    if (store.size > 500) {
+      const oldest = store.values().next().value;
+      if (oldest) store.delete(oldest);
+    }
+  }
+
+  function canHandleRealtimeMessage(messageId: string) {
+    if (handledRealtimeMessageIdsRef.current.has(messageId)) return false;
+    rememberHandledRealtimeMessage(messageId);
+    return true;
+  }
+
+  function handleRealtimeIncomingMessage(msg: Message) {
+    if (!canHandleRealtimeMessage(msg.id)) return;
+
+    const currentConvId = activeConvIdRef.current;
+    const isActive = !!currentConvId && msg.conversationId === currentConvId;
+    const isMine = !!meIdRef.current && msg.senderId === meIdRef.current;
+    const shouldAutoScrollInActive =
+      isMine || isMsgListNearBottomRef.current || isMessageListNearBottom(msgListRef.current);
+    const hadConversation = conversationsRef.current.some(
+      (conv) => conv.id === msg.conversationId
+    );
+
+    setConversations((prev) => {
+      if (!prev.length) return prev;
+      const next = prev.map((conv) => {
+        if (conv.id !== msg.conversationId) return conv;
+        return {
+          ...conv,
+          lastMessage: msg,
+          updatedAt: msg.createdAt,
+          unreadCount: isActive ? 0 : isMine ? conv.unreadCount ?? 0 : (conv.unreadCount ?? 0) + 1,
+        };
+      });
+      return sortConversationItems(next);
+    });
+
+    if (isActive) {
+      mergeMessageIntoList(msg);
+
+      requestAnimationFrame(() => {
+        if (shouldAutoScrollInActive) {
+          scrollToBottom();
+          setShowJumpNew(false);
+          setNewMsgsCount(0);
+        } else {
+          isMsgListNearBottomRef.current = false;
+          if (!isMine) {
+            setShowJumpNew(true);
+            setNewMsgsCount((prev) => prev + 1);
+          }
+        }
+      });
+      if (!isMine) void markConversationRead(msg.conversationId);
+    }
+
+    if (!hadConversation) {
+      void loadConversations(currentConvId ?? undefined);
+    }
+  }
+
+  function joinConversationRoom(conversationId: string) {
+    if (!conversationId) return;
+    socketRef.current?.emit("conversation:join", { conversationId });
   }
 
   function resetImageViewerTransform() {
@@ -980,6 +1214,8 @@ export function ChatPage() {
         const found = items.find((item) => item.id === selectConversationId);
         if (found) setActiveConv(found);
       }
+
+      return items;
     } finally {
       setLoadingConvs(false);
     }
@@ -1016,16 +1252,20 @@ export function ChatPage() {
       setMessagesNextCursor(res.data.nextCursor ?? null);
 
       if (!appendTop) scrollToBottom();
+      return items;
     } catch (e: any) {
       if (!appendTop) setMessages([]);
       setMessagesErr(e?.response?.data?.message ?? "Falha ao carregar mensagens");
+      return [];
     } finally {
       setLoadingMsgs(false);
     }
   }
 
-  async function openConversation(conv: ConversationListItem) {
+  async function openConversation(conv: ConversationListItem, focusMessageId?: string | null) {
+    const unreadCountBeforeOpen = Math.max(0, conv.unreadCount ?? 0);
     setActiveConv(conv);
+    isMsgListNearBottomRef.current = true;
     setSearchOpen(false);
     setSearchQ("");
     setSearchHits([]);
@@ -1035,6 +1275,8 @@ export function ChatPage() {
     setReplyTo(null);
     setActionMenuMsgId(null);
     setConversationMenuId(null);
+    setUnreadAnchorMessageId(null);
+    setShowJumpUnread(false);
     clearComposerAttachment();
     setConversations((prev) =>
       sortConversationItems(
@@ -1044,12 +1286,46 @@ export function ChatPage() {
       )
     );
 
-    socketRef.current?.emit("conversation:join", { conversationId: conv.id });
+    joinConversationRoom(conv.id);
 
-    await loadMessages(conv.id);
+    const loadedMessages = (await loadMessages(conv.id)) ?? [];
+    const unreadAnchorId = resolveUnreadAnchorMessageId(loadedMessages, unreadCountBeforeOpen);
+    setUnreadAnchorMessageId(unreadAnchorId);
     await markConversationRead(conv.id);
+    if (focusMessageId) {
+      const msgExists = loadedMessages.some((msg) => msg.id === focusMessageId);
+      if (msgExists) {
+        requestAnimationFrame(() => {
+          const container = msgListRef.current;
+          if (!container) return;
+          const row = container.querySelector(`[data-mid="${focusMessageId}"]`) as HTMLElement | null;
+          if (!row) return;
+          row.scrollIntoView({ behavior: "smooth", block: "center" });
+          row.classList.add("chat-msg-flash");
+          window.setTimeout(() => row.classList.remove("chat-msg-flash"), 1200);
+        });
+      } else {
+        await jumpToMessageById(focusMessageId);
+      }
+    } else {
+      scrollToBottom();
+      window.setTimeout(scrollToBottom, 70);
+    }
     setNewMsgsCount(0);
     setShowJumpNew(false);
+  }
+
+  async function openConversationById(conversationId: string, messageId?: string | null) {
+    if (!conversationId) return;
+
+    let conv = conversationsRef.current.find((item) => item.id === conversationId);
+    if (!conv) {
+      const items = await loadConversations(conversationId);
+      conv = items?.find((item) => item.id === conversationId);
+    }
+    if (!conv) return;
+
+    await openConversation(conv, messageId ?? null);
   }
 
   async function loadUsers() {
@@ -1358,6 +1634,8 @@ export function ChatPage() {
         setMessages([]);
         setNewMsgsCount(0);
         setShowJumpNew(false);
+        setUnreadAnchorMessageId(null);
+        setShowJumpUnread(false);
       }
 
       await loadConversations(activeConvIdRef.current ?? undefined);
@@ -1378,6 +1656,8 @@ export function ChatPage() {
         setMessages([]);
         setNewMsgsCount(0);
         setShowJumpNew(false);
+        setUnreadAnchorMessageId(null);
+        setShowJumpUnread(false);
       }
     } catch {}
   }
@@ -1424,11 +1704,17 @@ export function ChatPage() {
   }
 
 
-  function groupedMessages(items: Message[]) {
-    const out: Array<{ kind: "sep"; label: string } | { kind: "msg"; value: Message }> = [];
+  function groupedMessages(items: Message[], unreadMarkerMessageId?: string | null) {
+    const out: GroupedMessageRow[] = [];
     let last = "";
+    let unreadInserted = false;
 
     for (const msg of items) {
+      if (!unreadInserted && unreadMarkerMessageId && msg.id === unreadMarkerMessageId) {
+        out.push({ kind: "unread" });
+        unreadInserted = true;
+      }
+
       const label = fmtDayLabel(msg.createdAt);
       if (label !== last) {
         out.push({ kind: "sep", label });
@@ -1440,7 +1726,10 @@ export function ChatPage() {
     return out;
   }
 
-  const grouped = useMemo(() => groupedMessages(messages), [messages]);
+  const grouped = useMemo(
+    () => groupedMessages(messages, unreadAnchorMessageId),
+    [messages, unreadAnchorMessageId]
+  );
 
   const usersFiltered = useMemo(() => {
     const nq = normalizeText(userSearch);
@@ -1553,50 +1842,18 @@ export function ChatPage() {
     const s = createSocket(token);
     socketRef.current = s;
 
-    s.on("message:new", (msg: Message) => {
+    s.on("connect", () => {
       const currentConvId = activeConvIdRef.current;
-      const isActive = !!currentConvId && msg.conversationId === currentConvId;
-      const isMine = !!meIdRef.current && msg.senderId === meIdRef.current;
-      const hadConversation = conversationsRef.current.some(
-        (conv) => conv.id === msg.conversationId
-      );
+      if (currentConvId) joinConversationRoom(currentConvId);
+    });
 
-      setConversations((prev) => {
-        if (!prev.length) return prev;
-        const next = prev.map((conv) => {
-          if (conv.id !== msg.conversationId) return conv;
-          return {
-            ...conv,
-            lastMessage: msg,
-            updatedAt: msg.createdAt,
-            unreadCount: isActive ? 0 : isMine ? conv.unreadCount ?? 0 : (conv.unreadCount ?? 0) + 1,
-          };
-        });
-        return sortConversationItems(next);
-      });
+    s.on("message:new", (msg: Message) => {
+      handleRealtimeIncomingMessage(msg);
+    });
 
-      if (isActive) {
-        mergeMessageIntoList(msg);
-
-        requestAnimationFrame(() => {
-          const el = msgListRef.current;
-          if (!el) return;
-          const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
-          if (isMine || distanceFromBottom < 140) {
-            el.scrollTop = el.scrollHeight;
-            setShowJumpNew(false);
-            setNewMsgsCount(0);
-          } else {
-            setShowJumpNew(true);
-            setNewMsgsCount((prev) => prev + 1);
-          }
-        });
-        if (!isMine) void markConversationRead(msg.conversationId);
-      }
-
-      if (!hadConversation) {
-        void loadConversations(currentConvId ?? undefined);
-      }
+    s.on("user:message:new", (msg: Message) => {
+      void notifyIncomingMessage(msg);
+      handleRealtimeIncomingMessage(msg);
     });
 
     s.on("message:updated", (msg: Message) => {
@@ -1628,6 +1885,8 @@ export function ChatPage() {
         setMessages([]);
         setNewMsgsCount(0);
         setShowJumpNew(false);
+        setUnreadAnchorMessageId(null);
+        setShowJumpUnread(false);
       }
     });
 
@@ -1719,6 +1978,40 @@ export function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConv?.id]);
 
+  useEffect(() => {
+    syncUnreadJumpButton();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, unreadAnchorMessageId, activeConv?.id]);
+
+  useEffect(() => {
+    const desktopApi = window.bhashDesktop;
+    if (!desktopApi?.isDesktop || typeof desktopApi.onNotificationClick !== "function") return;
+
+    function handleNotificationTarget(target?: DesktopNotificationTarget | null) {
+      const conversationId = target?.conversationId?.trim();
+      if (!conversationId) return;
+      void openConversationById(conversationId, target?.messageId ?? null);
+    }
+
+    const off = desktopApi.onNotificationClick((payload) => {
+      handleNotificationTarget(payload);
+    });
+
+    if (typeof desktopApi.consumeNotificationTarget === "function") {
+      void desktopApi
+        .consumeNotificationTarget()
+        .then((pending) => {
+          handleNotificationTarget(pending);
+        })
+        .catch(() => undefined);
+    }
+
+    return () => {
+      off();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="chat-shell">
       <TopNav
@@ -1728,8 +2021,8 @@ export function ChatPage() {
         onToggleTheme={toggleTheme}
         logoSrc={resolvedLogoUrl}
         rightSlot={
-          <button className="chat-dangerBtn" onClick={logout}>
-            Sair
+          <button className="chat-dangerBtn" onClick={logoff}>
+            Logoff
           </button>
         }
       />
@@ -1851,6 +2144,8 @@ export function ChatPage() {
                       setMessages([]);
                       setNewMsgsCount(0);
                       setShowJumpNew(false);
+                      setUnreadAnchorMessageId(null);
+                      setShowJumpUnread(false);
                     }}
                     title="Voltar para conversas"
                   >
@@ -1909,11 +2204,13 @@ export function ChatPage() {
               onScroll={() => {
                 const el = msgListRef.current;
                 if (!el) return;
-                const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
-                if (distanceFromBottom < 120) {
+                const nearBottom = isMessageListNearBottom(el, 120);
+                isMsgListNearBottomRef.current = nearBottom;
+                if (nearBottom) {
                   setShowJumpNew(false);
                   setNewMsgsCount(0);
                 }
+                syncUnreadJumpButton();
                 if (!activeConv?.id || !messagesNextCursor || loadingMsgs) return;
                 if (el.scrollTop < 120) {
                   void loadMessages(activeConv.id, messagesNextCursor, true);
@@ -1936,6 +2233,21 @@ export function ChatPage() {
                         return (
                           <div key={`sep-${row.label}-${idx}`} className="chat-daySep">
                             {row.label}
+                          </div>
+                        );
+                      }
+
+                      if (row.kind === "unread") {
+                        return (
+                          <div
+                            key={`unread-${activeConv?.id ?? "conv"}-${idx}`}
+                            className="chat-unreadMarker"
+                            data-unread-anchor="true"
+                          >
+                            <span className="chat-unreadMarker__icon" aria-hidden="true">
+                              <ArrowDownIcon />
+                            </span>
+                            <span>Não lidas</span>
                           </div>
                         );
                       }
@@ -2268,6 +2580,21 @@ export function ChatPage() {
             ) : null}
           </div>
 
+            {showJumpUnread ? (
+              <button
+                className="chat-jumpUnreadBtn"
+                onClick={() => {
+                  scrollToUnreadAnchor();
+                }}
+                title="Ir para a primeira mensagem não lida"
+              >
+                <span className="chat-jumpUnreadBtn__icon" aria-hidden="true">
+                  <ArrowUpIcon />
+                </span>
+                <span>Não lidas</span>
+              </button>
+            ) : null}
+
             {showJumpNew ? (
               <button
                 className="chat-jumpNewBtn"
@@ -2382,7 +2709,7 @@ export function ChatPage() {
                   ref={composerInputRef}
                   value={text}
                   onChange={(e) => setText(e.target.value)}
-                  placeholder={activeConv ? "Digite sua mensagem..." : "Selecione uma conversa..."}
+                  placeholder={activeConv ? "Digite sua mensagem..." : "..."}
                   className="chat-input chat-input--composer"
                   disabled={!activeConv || sending}
                   onKeyDown={(e) => {

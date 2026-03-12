@@ -1,10 +1,14 @@
 param(
-  [string]$ProjectRoot = "C:\dev\bhash",
+  [string]$ProjectRoot = "",
   [string]$Pm2Home = "$env:USERPROFILE\.pm2"
 )
 
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
+
+if (-not $ProjectRoot) {
+  $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+}
 
 if (!(Test-Path $ProjectRoot)) {
   throw "ProjectRoot não encontrado: '$ProjectRoot'"

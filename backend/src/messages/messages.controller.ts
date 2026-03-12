@@ -114,6 +114,7 @@ export class MessagesController {
     this.events.emitMessageNew(conversationId, msg);
     const participantIds = await this.messages.getConversationParticipantIds(conversationId);
     for (const participantId of participantIds) {
+      this.events.emitUserMessageNew(participantId, msg);
       this.events.emitConversationsSync(participantId, { conversationId });
     }
 

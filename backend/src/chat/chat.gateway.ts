@@ -13,6 +13,7 @@ import { ConfigService } from '@nestjs/config';
 import { MessagesService } from '../messages/messages.service';
 import { ChatEventsService } from './chat-events.service';
 import { parseCorsOrigins } from '../common/cors-origins';
+import { getRequiredJwtSecret } from '../common/security-config';
 
 @WebSocketGateway({
   cors: {
@@ -34,9 +35,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayDisconnect {
     private readonly messages: MessagesService,
     private readonly events: ChatEventsService,
   ) {
-    const secret = this.config.get<string>('JWT_SECRET');
-    if (!secret) throw new Error('JWT_SECRET não definido no .env');
-    this.jwtSecret = secret;
+    this.jwtSecret = getRequiredJwtSecret(this.config);
   }
 
   afterInit(server: Server) {
@@ -174,6 +173,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayDisconnect {
     this.events.emitMessageNew(data.conversationId, msg);
     const participantIds = await this.messages.getConversationParticipantIds(data.conversationId);
     for (const participantId of participantIds) {
+      this.events.emitUserMessageNew(participantId, msg);
       this.events.emitConversationsSync(participantId, { conversationId: data.conversationId });
     }
 

@@ -1,9 +1,13 @@
 param(
-  [string]$ProjectRoot = "C:\dev\bhash"
+  [string]$ProjectRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
+
+if (-not $ProjectRoot) {
+  $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+}
 Set-Location $ProjectRoot
 
 Write-Host ">> Deploy inicial (instala, builda, sobe serviços e salva estado PM2)..."

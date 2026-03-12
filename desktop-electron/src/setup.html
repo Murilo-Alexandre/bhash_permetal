@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>BHash Desktop - Minhas configuracoes</title>
+    <style>
+      :root {
+        --bg: #070d16;
+        --panel: #0f1928;
+        --panel-soft: #132034;
+        --line: rgba(180, 208, 255, 0.18);
+        --text: #e8f0ff;
+        --muted: #9cb1d6;
+        --primary: #0062cc;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Arial, sans-serif;
+        background: radial-gradient(900px 500px at -20% -20%, rgba(0, 98, 204, 0.14), transparent 60%), var(--bg);
+        color: var(--text);
+      }
+      .wrap {
+        padding: 22px;
+      }
+      .panel {
+        background: linear-gradient(145deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0));
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 18px;
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 22px;
+      }
+      .sub {
+        color: var(--muted);
+        margin-bottom: 16px;
+        font-size: 14px;
+      }
+      .row {
+        display: grid;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      input[type="text"] {
+        width: 100%;
+        height: 40px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--panel-soft);
+        color: var(--text);
+        padding: 0 12px;
+        outline: none;
+      }
+      input[type="text"]:focus {
+        border-color: rgba(0, 98, 204, 0.7);
+        box-shadow: 0 0 0 3px rgba(0, 98, 204, 0.2);
+      }
+      .actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      button {
+        height: 38px;
+        border-radius: 10px;
+        border: 1px solid transparent;
+        color: #fff;
+        background: #1a2f4e;
+        padding: 0 14px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 0.14s ease, filter 0.14s ease, border-color 0.14s ease;
+      }
+      button:hover {
+        transform: translateY(-1px);
+        filter: brightness(1.08);
+      }
+      button:active {
+        transform: translateY(0);
+      }
+      .btn-primary {
+        background: linear-gradient(135deg, #0055b2, var(--primary));
+      }
+      .btn-ghost {
+        background: transparent;
+        border-color: var(--line);
+        color: var(--text);
+      }
+      .switch {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        background: rgba(0, 0, 0, 0.18);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+      }
+      .meta {
+        display: grid;
+        gap: 4px;
+        margin-top: 14px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .status {
+        min-height: 20px;
+        margin-top: 8px;
+        color: #c9ddff;
+        font-size: 13px;
+      }
+      .error {
+        color: #ff9ea8;
+      }
+      .ok {
+        color: #9debb8;
+      }
+      code {
+        font-family: Consolas, "Courier New", monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <section class="panel">
+        <h1>Minhas configuracoes</h1>
+        <div class="sub">Ajuste o servidor e comportamento do app desktop.</div>
+
+        <div class="row">
+          <label for="serverUrl">URL do servidor (chat web)</label>
+          <input id="serverUrl" type="text" placeholder="http://localhost:5173" />
+          <div class="actions">
+            <button id="saveServerBtn" class="btn-primary">Salvar servidor</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="switch">
+            <input id="autoStart" type="checkbox" />
+            <label for="autoStart">Iniciar com o Windows (login do usuario)</label>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="checkUpdateBtn" class="btn-ghost">Checar update</button>
+        </div>
+
+        <div id="status" class="status"></div>
+
+        <div class="meta">
+          <div>Canal de update unico: <code id="updateUrl">-</code></div>
+          <div>Versao instalada: <code id="version">-</code></div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const desktop = window.bhashDesktop;
+      const statusEl = document.getElementById("status");
+      const serverInput = document.getElementById("serverUrl");
+      const autoStartInput = document.getElementById("autoStart");
+      const updateUrlEl = document.getElementById("updateUrl");
+      const versionEl = document.getElementById("version");
+
+      function setStatus(message, isError = false) {
+        statusEl.textContent = message || "";
+        statusEl.className = `status ${isError ? "error" : "ok"}`;
+      }
+
+      async function hydrate() {
+        if (!desktop?.isDesktop) {
+          setStatus("Janela de configuracoes disponivel apenas no app desktop.", true);
+          return;
+        }
+
+        const config = await desktop.getConfig();
+        serverInput.value = config.serverUrl || "";
+        autoStartInput.checked = !!config.autoStart;
+        updateUrlEl.textContent = config.updateUrl || "-";
+        versionEl.textContent = config.version || "-";
+      }
+
+      document.getElementById("saveServerBtn").addEventListener("click", async () => {
+        const result = await desktop.setServerUrl(serverInput.value);
+        if (!result.ok) {
+          setStatus(result.error || "Falha ao salvar URL.", true);
+          return;
+        }
+        setStatus(`Servidor atualizado: ${result.serverUrl}`);
+      });
+
+      autoStartInput.addEventListener("change", async () => {
+        const result = await desktop.setAutoStart(autoStartInput.checked);
+        if (!result.ok) {
+          setStatus("Falha ao atualizar auto-start.", true);
+          return;
+        }
+        setStatus(`Auto-start ${result.autoStart ? "ativado" : "desativado"}.`);
+      });
+
+      document.getElementById("checkUpdateBtn").addEventListener("click", async () => {
+        setStatus("Checando updates...");
+        const result = await desktop.checkUpdates();
+        if (!result.ok && result.reason !== "dev-mode") {
+          setStatus(result.error || "Falha ao checar updates.", true);
+        }
+        if (result.reason === "dev-mode") {
+          setStatus("Update automatico funciona em build instalada (nao em dev).");
+        }
+      });
+
+      desktop?.onUpdateStatus((payload) => {
+        const text = payload?.error || payload?.info || payload?.status || "";
+        setStatus(text, !!payload?.error);
+      });
+
+      hydrate();
+    </script>
+  </body>
+</html>
+

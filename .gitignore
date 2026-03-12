@@ -1,2 +1,70 @@
+# Dependencies
 node_modules/
+**/node_modules/
+
+# Build artifacts
+dist/
+out/
+build/
+coverage/
+.nyc_output/
+**/dist/
+**/out/
+**/build/
+**/dist-ssr/
+**/coverage/
+backend/generated/prisma/
+
+# Runtime / logs
+logs/
+pids/
 *.log
+*.pid
+*.seed
+*.pid.lock
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Environment files
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+deploy/tenant.env
+
+# Runtime uploads (server local data)
+backend/public/uploads/**
+!backend/public/uploads/
+!backend/public/uploads/.gitkeep
+!backend/public/uploads/avatars/
+!backend/public/uploads/avatars/.gitkeep
+!backend/public/uploads/chat-files/
+!backend/public/uploads/chat-files/.gitkeep
+!backend/public/uploads/chat-images/
+!backend/public/uploads/chat-images/.gitkeep
+
+# Editors / OS
+.DS_Store
+.idea/
+.project
+.classpath
+.settings/
+.c9/
+*.launch
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.vscode/*
+
+# Temp
+.temp/
+.tmp/
+*.local

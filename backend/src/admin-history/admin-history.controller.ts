@@ -1,4 +1,3 @@
-// C:\dev\bhash\backend\src\admin-history\admin-history.controller.ts
 import {
   Controller,
   Get,

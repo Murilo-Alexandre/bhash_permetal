@@ -1,0 +1,68 @@
+{
+  "name": "bhash-desktop",
+  "version": "0.1.2",
+  "description": "BHash Desktop Electron Client",
+  "main": "src/main.js",
+  "private": true,
+  "author": "BHash",
+  "license": "UNLICENSED",
+  "scripts": {
+    "defaults:sync": "node scripts/generate-defaults.js",
+    "predev": "node scripts/generate-defaults.js",
+    "dev": "cross-env NODE_ENV=development electron .",
+    "prestart": "node scripts/generate-defaults.js",
+    "start": "electron .",
+    "predist": "node scripts/generate-defaults.js",
+    "dist": "electron-builder",
+    "predist:win": "node scripts/generate-defaults.js",
+    "dist:win": "electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "electron-log": "^5.2.4",
+    "electron-updater": "^6.6.2"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^37.4.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.bhash.chat.desktop",
+    "productName": "BHash Chat",
+    "artifactName": "BHash Chat Setup ${version}.${ext}",
+    "executableName": "BHashChat",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "icon": "src/assets/BHash_Electron.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "BHash Chat",
+      "uninstallDisplayName": "BHash Chat"
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://updates.bhash.com/desktop/win"
+      }
+    ]
+  }
+}

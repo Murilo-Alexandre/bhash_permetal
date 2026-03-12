@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
+import { resolveProjectEnvPaths } from './common/project-env';
 
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -30,7 +31,10 @@ import { AdminHistoryModule } from './admin-history/admin-history.module';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: resolveProjectEnvPaths(),
+    }),
 
     PrismaModule,
 

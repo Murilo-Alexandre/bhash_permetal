@@ -48,7 +48,13 @@ bhash/
 
 ## Variaveis de Ambiente
 
-Arquivo principal: `backend/.env`.
+Arquivo principal (unico): `.env` na raiz (copie de `.env.example`).
+
+Bootstrap rapido:
+
+```bash
+npm run env:init
+```
 
 Minimo necessario:
 
@@ -56,7 +62,34 @@ Minimo necessario:
 DATABASE_URL=postgresql://bhash:bhashpass@localhost:5432/bhash
 JWT_SECRET=troque-por-uma-chave-forte
 CORS_ORIGINS=http://localhost:5173,http://localhost:5174,LAN
+CHAT_WEB_URL=http://localhost:5173
+DESKTOP_UPDATE_URL=https://updates.bhash.com/desktop/win
 ```
+
+## Deploy Multi-Empresa (recomendado)
+
+Para implantar rapido em varias empresas, use o tenant kit:
+
+1. Preencha `deploy/tenant.env` (copie de `deploy/tenant.env.example`).
+2. Gere kit server/cliente:
+
+```bash
+npm run deploy:render -- --tenant-file deploy/tenant.env
+```
+
+3. Suba servidor:
+
+```bash
+npm run deploy:server:up -- --tenant-file deploy/tenant.env
+```
+
+4. Publique desktop + canal de update:
+
+```bash
+npm run deploy:desktop:release -- --tenant-file deploy/tenant.env
+```
+
+Guia completo: [deploy/README.md](deploy/README.md)
 
 ## Desenvolvimento Local
 
@@ -95,7 +128,7 @@ cd /opt/bhash
 
 ### 3) Configurar `.env`
 
-Edite `backend/.env` com valores do servidor.
+Edite `.env` na raiz com valores do servidor.
 
 ### 4) Deploy inicial
 
@@ -159,10 +192,25 @@ npm run services:reload
 npm run services:save
 ```
 
+## HTTPS Interno + PWA (recomendado em empresa)
+
+Para ambiente interno sem publicacao externa, use reverse proxy HTTPS com certificado da CA interna.
+
+- Guia completo: [docs/internal-https-pwa.md](docs/internal-https-pwa.md)
+- Exemplo Nginx: [docs/nginx/bhash-internal.conf](docs/nginx/bhash-internal.conf)
+- Guia Caddy Windows: [docs/caddy/windows-caddy-internal.md](docs/caddy/windows-caddy-internal.md)
+
+Comandos PM2 para modo proxy interno (bind em localhost):
+
+```bash
+npm run services:start:proxy
+npm run services:reload:proxy
+```
+
 ## Producao Windows (resumo)
 
 ```powershell
-cd C:\dev\bhash
+cd C:\bhash
 npm run infra:up
 npm run setup:server
 npm run services:start
@@ -229,4 +277,38 @@ Normalmente e `DATABASE_URL`, `JWT_SECRET` ou migracao pendente.
 
 ## Electron (cliente instalavel)
 
-Roadmap: [docs/electron-rollout.md](docs/electron-rollout.md)
+Comandos principais:
+
+```bash
+npm run desktop:install
+npm run desktop:dev
+npm run desktop:dist:win
+npm run desktop:release:win
+```
+
+`desktop:dev` e `desktop:dist:win` leem automaticamente `.env` (raiz) e embutem os defaults do Electron.
+Variaveis usadas:
+
+- `CHAT_WEB_URL` (ou `BHASH_DESKTOP_SERVER_URL`) para URL inicial do chat no app desktop
+- `DESKTOP_UPDATE_URL` (ou `BHASH_DESKTOP_UPDATE_URL`) para feed de update
+
+Canal de update unico (todos os clientes):
+
+- `https://updates.bhash.com/desktop/win`
+
+Fluxo de release desktop:
+
+1. (Opcional) Definir `DESKTOP_UPDATE_PUBLISH_DIR` no `.env` (pasta local/rede do endpoint de update).
+2. Rodar `npm run desktop:release:win` (incrementa patch + builda + publica).
+3. Alternativas: `desktop:release:win:minor`, `desktop:release:win:major` ou `desktop:release:win -- --version X.Y.Z`.
+4. Todos os clientes instalados atualizam por esse mesmo canal.
+
+Modo maquina (PC compartilhado, sem senha por update):
+
+1. Instalar app uma vez como `all-users` (admin).
+2. Instalar tarefa updater SYSTEM (admin): `npm run desktop:updater:install`.
+   - fallback para certificado local nao confiavel: `npm run desktop:updater:install:insecure`
+3. Publicar novas versoes no canal: `npm run desktop:release:win`.
+4. Consultar status do updater: `npm run desktop:updater:status`.
+
+Guia detalhado: [Desktop Electron](desktop-electron/README.md) e [docs/electron-rollout.md](docs/electron-rollout.md)
