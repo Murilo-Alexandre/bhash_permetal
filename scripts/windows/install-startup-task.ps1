@@ -23,7 +23,7 @@ if (!(Test-Path $pm2Runner)) {
   throw "Script não encontrado: '$pm2Runner'."
 }
 
-$argument = "-NoProfile -ExecutionPolicy Bypass -File `"$pm2Runner`" -ProjectRoot `"$ProjectRoot`" -Pm2Home `"$Pm2Home`""
+$argument = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$pm2Runner`" -ProjectRoot `"$ProjectRoot`" -Pm2Home `"$Pm2Home`""
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument -WorkingDirectory $ProjectRoot
 $isAdmin = Test-IsAdmin
 

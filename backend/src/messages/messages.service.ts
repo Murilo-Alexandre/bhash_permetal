@@ -1,9 +1,70 @@
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { mediaRetentionIntervalLabel } from '../admin-history/media-retention.util';
+import {
+  isLikelyMediaFile,
+  normalizeUploadedFileName,
+} from '../common/upload-filename.util';
 
 @Injectable()
 export class MessagesService {
   constructor(private readonly prisma: PrismaService) {}
+
+  private normalizeAttachmentName(value?: string | null) {
+    const normalized = normalizeUploadedFileName(value);
+    return normalized || null;
+  }
+
+  private isMediaAttachment(message: {
+    contentType?: string | null;
+    attachmentMime?: string | null;
+    attachmentName?: string | null;
+    attachmentUrl?: string | null;
+  }) {
+    if (message.contentType === 'IMAGE') return true;
+    return isLikelyMediaFile(message);
+  }
+
+  private mapReplyTo(replyTo: any) {
+    if (!replyTo) return null;
+    return {
+      id: replyTo.id,
+      body: replyTo.body ?? '',
+      contentType: this.isMediaAttachment(replyTo) ? 'IMAGE' : replyTo.contentType,
+      attachmentUrl: replyTo.attachmentUrl ?? null,
+      attachmentName: this.normalizeAttachmentName(replyTo.attachmentName),
+      attachmentMime: replyTo.attachmentMime ?? null,
+      sender: replyTo.sender
+        ? {
+            id: replyTo.sender.id,
+            username: replyTo.sender.username,
+            name: replyTo.sender.name,
+            avatarUrl: replyTo.sender.avatarUrl ?? null,
+          }
+        : null,
+    };
+  }
+
+  private serializeMessage(msg: any) {
+    return {
+      id: msg.id,
+      createdAt: msg.createdAt,
+      conversationId: msg.conversationId,
+      senderId: msg.senderId,
+      body: msg.body ?? '',
+      contentType: this.isMediaAttachment(msg) ? 'IMAGE' : msg.contentType,
+      attachmentUrl: msg.attachmentUrl ?? null,
+      attachmentName: this.normalizeAttachmentName(msg.attachmentName),
+      attachmentMime: msg.attachmentMime ?? null,
+      attachmentSize: msg.attachmentSize ?? null,
+      replyToId: msg.replyToId ?? null,
+      deletedAt: msg.deletedAt ?? null,
+      sender: msg.sender ?? null,
+      replyTo: this.mapReplyTo(msg.replyTo),
+      reactions: msg.reactions ?? [],
+      isFavorited: Array.isArray(msg.favorites) ? msg.favorites.length > 0 : !!msg.isFavorited,
+    };
+  }
 
   private async assertMember(userId: string, conversationId: string) {
     const conv = await this.prisma.conversation.findUnique({
@@ -43,6 +104,7 @@ export class MessagesService {
           contentType: true,
           attachmentUrl: true,
           attachmentName: true,
+          attachmentMime: true,
           sender: {
             select: {
               id: true,
@@ -87,24 +149,7 @@ export class MessagesService {
 
     if (!msg) throw new BadRequestException('Mensagem não encontrada');
 
-    return {
-      id: msg.id,
-      createdAt: msg.createdAt,
-      conversationId: msg.conversationId,
-      senderId: msg.senderId,
-      body: msg.body ?? '',
-      contentType: msg.contentType,
-      attachmentUrl: msg.attachmentUrl,
-      attachmentName: msg.attachmentName,
-      attachmentMime: msg.attachmentMime,
-      attachmentSize: msg.attachmentSize,
-      replyToId: msg.replyToId,
-      deletedAt: msg.deletedAt,
-      sender: msg.sender,
-      replyTo: msg.replyTo,
-      reactions: msg.reactions,
-      isFavorited: msg.favorites.length > 0,
-    };
+    return this.serializeMessage(msg);
   }
 
   async send(input: {
@@ -142,14 +187,13 @@ export class MessagesService {
     let attachmentSize: number | null = null;
 
     if (file) {
-      const treatAsImage =
-        input.uploadMode === 'image' && /^image\//i.test(file.mimetype);
+      const treatAsMedia = input.uploadMode === 'image' && isLikelyMediaFile(file);
 
-      contentType = treatAsImage ? 'IMAGE' : 'FILE';
-      attachmentUrl = treatAsImage
-        ? `/static/uploads/chat-images/${file.filename}`
+      contentType = treatAsMedia ? 'IMAGE' : 'FILE';
+      attachmentUrl = treatAsMedia
+        ? `/static/uploads/chat-media/${file.filename}`
         : `/static/uploads/chat-files/${file.filename}`;
-      attachmentName = file.originalname;
+      attachmentName = this.normalizeAttachmentName(file.originalname);
       attachmentMime = file.mimetype;
       attachmentSize = file.size;
     }
@@ -240,24 +284,7 @@ export class MessagesService {
 
     const nextCursor = rows.length === pageSize ? rows[rows.length - 1].id : null;
 
-    const items = rows.reverse().map((msg) => ({
-      id: msg.id,
-      createdAt: msg.createdAt,
-      conversationId: msg.conversationId,
-      senderId: msg.senderId,
-      body: msg.body ?? '',
-      contentType: msg.contentType,
-      attachmentUrl: msg.attachmentUrl,
-      attachmentName: msg.attachmentName,
-      attachmentMime: msg.attachmentMime,
-      attachmentSize: msg.attachmentSize,
-      replyToId: msg.replyToId,
-      deletedAt: msg.deletedAt,
-      sender: msg.sender,
-      replyTo: msg.replyTo,
-      reactions: msg.reactions,
-      isFavorited: msg.favorites.length > 0,
-    }));
+    const items = rows.reverse().map((msg) => this.serializeMessage(msg));
 
     return { ok: true, items, nextCursor };
   }
@@ -353,24 +380,7 @@ export class MessagesService {
       include: this.messageInclude(userId),
     });
 
-    const items = rows.map((msg) => ({
-      id: msg.id,
-      createdAt: msg.createdAt,
-      conversationId: msg.conversationId,
-      senderId: msg.senderId,
-      body: msg.body ?? '',
-      contentType: msg.contentType,
-      attachmentUrl: msg.attachmentUrl,
-      attachmentName: msg.attachmentName,
-      attachmentMime: msg.attachmentMime,
-      attachmentSize: msg.attachmentSize,
-      replyToId: msg.replyToId,
-      deletedAt: msg.deletedAt,
-      sender: msg.sender,
-      replyTo: msg.replyTo,
-      reactions: msg.reactions,
-      isFavorited: msg.favorites.length > 0,
-    }));
+    const items = rows.map((msg) => this.serializeMessage(msg));
 
     return { ok: true, q: term, total: items.length, items };
   }
@@ -386,39 +396,63 @@ export class MessagesService {
 
     const takeN = Math.min(Math.max(parseInt(take ?? '300', 10) || 300, 1), 1000);
 
-    const contentType =
-      kind === 'image' ? 'IMAGE' : kind === 'file' ? 'FILE' : undefined;
-
     const rows = await this.prisma.message.findMany({
       where: {
         conversationId,
         deletedAt: null,
         hiddenForUsers: { none: { userId } },
         ...(state?.clearedAt ? { createdAt: { gt: state.clearedAt } } : {}),
-        ...(contentType ? { contentType } : { contentType: { in: ['IMAGE', 'FILE'] } }),
+        contentType: { in: ['IMAGE', 'FILE'] },
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: takeN,
       include: this.messageInclude(userId),
     });
 
-    const items = rows.map((msg) => ({
-      id: msg.id,
-      createdAt: msg.createdAt,
-      conversationId: msg.conversationId,
-      senderId: msg.senderId,
-      body: msg.body ?? '',
-      contentType: msg.contentType,
-      attachmentUrl: msg.attachmentUrl,
-      attachmentName: msg.attachmentName,
-      attachmentMime: msg.attachmentMime,
-      attachmentSize: msg.attachmentSize,
-      sender: msg.sender,
-      isFavorited: msg.favorites.length > 0,
-      reactions: msg.reactions,
-    }));
+    const items = rows
+      .map((msg) => this.serializeMessage(msg))
+      .filter((msg) => {
+        if (!msg.attachmentUrl) return false;
+        const isMedia = this.isMediaAttachment(msg);
+        if (kind === 'image') return isMedia;
+        if (kind === 'file') return !isMedia;
+        return true;
+      });
 
     return { ok: true, items };
+  }
+
+  async getVisibleMediaRetentionPolicy(userId: string, conversationId: string) {
+    await this.assertMember(userId, conversationId);
+
+      const cfg = await this.prisma.appConfig.upsert({
+        where: { id: 'default' },
+        update: {},
+        create: { id: 'default' },
+        select: {
+          mediaRetentionEnabled: true,
+          mediaRetentionInterval: true,
+          mediaRetentionIntervalCount: true,
+          mediaRetentionShowToUsers: true,
+          mediaRetentionNextRunAt: true,
+        },
+    });
+
+    if (!cfg.mediaRetentionShowToUsers) {
+      return { ok: true, visible: false };
+    }
+
+      return {
+        ok: true,
+        visible: true,
+        enabled: cfg.mediaRetentionEnabled,
+        interval: cfg.mediaRetentionInterval,
+        intervalLabel: mediaRetentionIntervalLabel(
+          cfg.mediaRetentionInterval,
+          cfg.mediaRetentionIntervalCount,
+        ),
+        nextRunAt: cfg.mediaRetentionNextRunAt,
+      };
   }
 
   async toggleFavorite(userId: string, messageId: string, value: boolean) {

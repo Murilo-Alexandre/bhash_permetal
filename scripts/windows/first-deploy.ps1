@@ -17,7 +17,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ">> Criando tarefa de startup para restaurar serviços no boot..."
-powershell -ExecutionPolicy Bypass -File ".\scripts\windows\install-startup-task.ps1" -ProjectRoot $ProjectRoot
+powershell -ExecutionPolicy Bypass -File ".\scripts\windows\install-server-startup-tasks.ps1" -ProjectRoot $ProjectRoot
 if ($LASTEXITCODE -ne 0) {
   throw "Falha ao criar tarefa de startup."
 }

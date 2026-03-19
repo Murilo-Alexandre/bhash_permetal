@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { useAdminAuth } from "./adminAuth";
 import { useTheme } from "./theme";
 import { TopNav } from "./components/TopNav";
@@ -29,11 +29,12 @@ function MenuIcon() {
 }
 
 export default function App() {
-  const { isAuthenticated, logout, api } = useAdminAuth();
+  const { isAuthenticated, logout, logoff, api } = useAdminAuth();
   const { theme, toggle, logoUrl } = useTheme();
   const [page, setPage] = useState<PageKey>("dashboard");
   const [isMobileNav, setIsMobileNav] = useState(() => window.innerWidth <= 900);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const isAppConfigPage = page === "appConfig";
 
   const [me, setMe] = useState<Me | null>(null);
   const [loadingMe, setLoadingMe] = useState(false);
@@ -81,7 +82,7 @@ export default function App() {
   if (loadingMe || !me) {
     return (
       <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", color: "var(--muted)" }}>
-        Carregando…
+        Carregando...
       </div>
     );
   }
@@ -93,7 +94,7 @@ export default function App() {
     }
 
     return (
-      <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+      <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
         <TopNav
           title="BHASH • Admin"
           subtitle="Painel administrativo"
@@ -101,7 +102,7 @@ export default function App() {
         onToggleTheme={toggle}
         logoSrc={logoUrl}
         rightSlot={
-          <button onClick={logout} className="admin-logoutBtn">
+          <button onClick={logoff} className="admin-logoutBtn">
             Sair
           </button>
         }
@@ -112,7 +113,7 @@ export default function App() {
   }
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+    <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
       <TopNav
         title="BHASH • Admin"
         subtitle="Painel administrativo"
@@ -165,7 +166,7 @@ export default function App() {
                   >
                     Históricos
                   </button>
-                  <button onClick={logout} className="admin-mobileNavItem admin-mobileNavItem--danger">
+                  <button onClick={logoff} className="admin-mobileNavItem admin-mobileNavItem--danger">
                     Sair
                   </button>
                 </div>
@@ -211,7 +212,7 @@ export default function App() {
                 Históricos
               </button>
 
-              <button onClick={logout} className="admin-logoutBtn">
+              <button onClick={logoff} className="admin-logoutBtn">
                 Sair
               </button>
             </div>
@@ -219,7 +220,14 @@ export default function App() {
         }
       />
 
-      <div style={{ flex: 1 }}>
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflow: isAppConfigPage && !isMobileNav ? "hidden" : "auto",
+          display: isAppConfigPage && !isMobileNav ? "flex" : "block",
+        }}
+      >
         {page === "dashboard" ? (
           <AdminDashboard />
         ) : page === "appConfig" ? (
@@ -235,3 +243,4 @@ export default function App() {
     </div>
   );
 }
+

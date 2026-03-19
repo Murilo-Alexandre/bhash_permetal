@@ -1,6 +1,6 @@
 {
   "name": "bhash-desktop",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "BHash Desktop Electron Client",
   "main": "src/main.js",
   "private": true,

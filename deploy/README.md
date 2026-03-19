@@ -6,6 +6,8 @@ Objetivo: trocar dados da empresa em **um unico arquivo** e gerar tudo para serv
 
 1. Copie `deploy/tenant.env.example` para `deploy/tenant.env`.
 2. Ajuste somente os valores dessa empresa (IP, dominios, secrets, pasta de updates).
+3. Se quiser HTTPS apenas no chat, deixe `ADMIN_HTTPS_ENABLED=false`.
+4. Se quiser admin tambem em HTTPS, use `ADMIN_HTTPS_ENABLED=true` e preencha `ADMIN_HOST`.
 
 Opcional (atalho):
 
@@ -47,6 +49,19 @@ Esse comando:
 3. builda backend/front/admin
 4. sobe PM2 (modo proxy interno por padrao)
 5. salva estado PM2
+
+Para Windows servidor, rode depois em PowerShell como Administrador:
+
+```bash
+npm run server:startup:install
+```
+
+Esse passo instala:
+
+- `BHash-PM2-Resurrect` em `SYSTEM / AtStartup`
+- `BHash-Caddy-Start` em `SYSTEM / AtStartup`
+
+Resultado: o servidor sobe sem depender do login do usuário e sem janela de PowerShell do Caddy.
 
 ## 4) Publicar desktop + canal de update
 

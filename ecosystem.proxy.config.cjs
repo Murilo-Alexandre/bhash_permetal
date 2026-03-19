@@ -7,7 +7,7 @@ module.exports = {
       interpreter: "node",
       env: {
         NODE_ENV: "production",
-        APP_HOST: "127.0.0.1",
+        APP_HOST: "0.0.0.0",
         PORT: "3000",
       },
     },
@@ -24,11 +24,13 @@ module.exports = {
     {
       name: "bhash-frontend-admin",
       cwd: "./frontend-admin",
-      script: "./node_modules/vite/bin/vite.js",
-      args: "preview --host 127.0.0.1 --port 5174 --strictPort",
+      script: "./server.cjs",
       interpreter: "node",
       env: {
         NODE_ENV: "production",
+        HOST: "0.0.0.0",
+        PORT: "5174",
+        ADMIN_PROXY_TARGET: "http://127.0.0.1:3000",
       },
     },
   ],

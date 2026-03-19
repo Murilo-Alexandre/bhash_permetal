@@ -10,6 +10,7 @@ const {
   Menu,
   nativeImage,
   shell,
+  session,
 } = require("electron");
 const log = require("electron-log/main");
 const { autoUpdater } = require("electron-updater");
@@ -126,6 +127,7 @@ let updateTimer = null;
 let pendingNotificationTarget = null;
 let saveWindowStateTimer = null;
 let activeNativeNotification = null;
+let desktopCertificateHandlingReady = false;
 
 log.initialize();
 log.transports.file.level = "info";
@@ -147,6 +149,78 @@ function normalizeHttpUrl(value) {
   } catch {
     return null;
   }
+}
+
+function configuredHttpsHosts() {
+  const hosts = new Set();
+  for (const candidate of [config?.serverUrl, config?.updateUrl, DEFAULT_CONFIG.serverUrl, DEFAULT_CONFIG.updateUrl]) {
+    const normalized = normalizeHttpUrl(candidate);
+    if (!normalized) continue;
+    try {
+      const parsed = new URL(normalized);
+      if (parsed.protocol === "https:" && parsed.hostname) {
+        hosts.add(parsed.hostname.toLowerCase());
+      }
+    } catch {
+      // no-op
+    }
+  }
+  return hosts;
+}
+
+function shouldTrustConfiguredCertificate(targetUrl, errorCode = "") {
+  const normalized = normalizeHttpUrl(targetUrl);
+  if (!normalized) return false;
+
+  try {
+    const parsed = new URL(normalized);
+    const host = parsed.hostname.toLowerCase();
+    if (!configuredHttpsHosts().has(host)) return false;
+
+    const normalizedError = String(errorCode || "").toUpperCase();
+    if (!normalizedError) return true;
+
+    return (
+      normalizedError.includes("AUTHORITY_INVALID") ||
+      normalizedError.includes("SELF_SIGNED") ||
+      normalizedError.includes("CERT_INVALID") ||
+      normalizedError.includes("UNABLE_TO_GET_ISSUER_CERT")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function setupDesktopCertificateHandling() {
+  if (desktopCertificateHandlingReady) return;
+  desktopCertificateHandlingReady = true;
+
+  app.on("certificate-error", (event, _webContents, targetUrl, error, certificate, callback) => {
+    if (!shouldTrustConfiguredCertificate(targetUrl, error)) {
+      callback(false);
+      return;
+    }
+
+    event.preventDefault();
+    log.warn(
+      `Trusting configured HTTPS certificate for ${targetUrl} (${error || "no-error-code"})` +
+        (certificate?.issuerName ? ` issuer=${certificate.issuerName}` : "")
+    );
+    callback(true);
+  });
+
+  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+    if (!shouldTrustConfiguredCertificate(request.hostname ? `https://${request.hostname}` : "", request.verificationResult || request.errorCode)) {
+      callback(-3);
+      return;
+    }
+
+    log.warn(
+      `Bypassing certificate verification for configured host ${request.hostname} ` +
+        `(${request.verificationResult || request.errorCode || "unknown"})`
+    );
+    callback(0);
+  });
 }
 
 function normalizeWindowState(input) {
@@ -358,6 +432,17 @@ function createMainWindow() {
       emitNotificationClick(pendingNotificationTarget);
     }
   });
+
+  mainWindow.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return;
+      log.error(
+        `Main window failed to load: ${validatedURL || config.serverUrl} ` +
+          `[${errorCode}] ${errorDescription}`
+      );
+    }
+  );
 
   mainWindow.on("close", (event) => {
     saveWindowStateNow();
@@ -667,6 +752,7 @@ function setupIpc() {
 function bootstrap() {
   config = loadConfig();
   app.setAppUserModelId("com.bhash.chat.desktop");
+  setupDesktopCertificateHandling();
   applyAutoStartSetting(config.autoStart);
   setupIpc();
   setupUpdater();

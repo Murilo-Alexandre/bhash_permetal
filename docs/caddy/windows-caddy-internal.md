@@ -93,6 +93,23 @@ Para parar:
 C:\caddy\caddy.exe stop
 ```
 
+## 4.1) Startup automatico recomendado
+
+Em servidor Windows, não deixe o Caddy depender de um PowerShell aberto no login do usuário.
+
+Na raiz do projeto, rode em PowerShell como Administrador:
+
+```powershell
+npm run server:startup:install
+```
+
+Isso instala duas tarefas da máquina:
+
+- `BHash-PM2-Resurrect`: sobe backend/chat/admin antes do login
+- `BHash-Caddy-Start`: sobe o proxy HTTPS antes do login
+
+Esse é o formato recomendado para implantação interna em empresa.
+
 ## 5) Resolver DNS interno (obrigatorio para celular)
 
 Para laboratorio rapido, no Windows local:

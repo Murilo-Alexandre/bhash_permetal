@@ -10,12 +10,14 @@ export function LoginPage() {
 
   const [username, setUsername] = useState(() => savedCredentials?.username ?? "");
   const [password, setPassword] = useState(() => savedCredentials?.password ?? "");
+  const [showPassword, setShowPassword] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const lockSavedCredentials = rememberLogin && !!savedCredentials;
   const formBusy = loading || autoLoginLoading;
+  const showPasswordDisabled = formBusy || lockSavedCredentials;
 
   useEffect(() => {
     if (rememberLogin && savedCredentials) {
@@ -102,25 +104,89 @@ export function LoginPage() {
               }}
             />
 
-            <input
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="senha"
-              type="password"
-              autoComplete="current-password"
-              disabled={formBusy || lockSavedCredentials}
-              style={{
-                padding: "12px 12px",
-                borderRadius: 12,
-                border: lockSavedCredentials ? "1px dashed var(--border)" : "1px solid var(--input-border)",
-                background: lockSavedCredentials ? "rgba(127, 127, 127, 0.14)" : "var(--input-bg)",
-                color: lockSavedCredentials ? "var(--muted)" : "var(--input-fg)",
-                outline: "none",
-                cursor: lockSavedCredentials ? "not-allowed" : "text",
-                opacity: lockSavedCredentials ? 0.78 : 1,
-                transition: "all .2s ease",
-              }}
-            />
+            <div style={{ position: "relative" }}>
+              <input
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="senha"
+                type={showPassword ? "text" : "password"}
+                autoComplete="current-password"
+                disabled={formBusy || lockSavedCredentials}
+                style={{
+                  width: "100%",
+                  padding: "12px 44px 12px 12px",
+                  borderRadius: 12,
+                  border: lockSavedCredentials ? "1px dashed var(--border)" : "1px solid var(--input-border)",
+                  background: lockSavedCredentials ? "rgba(127, 127, 127, 0.14)" : "var(--input-bg)",
+                  color: lockSavedCredentials ? "var(--muted)" : "var(--input-fg)",
+                  outline: "none",
+                  cursor: lockSavedCredentials ? "not-allowed" : "text",
+                  opacity: lockSavedCredentials ? 0.78 : 1,
+                  transition: "all .2s ease",
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                disabled={showPasswordDisabled}
+                aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}
+                title={showPassword ? "Ocultar senha" : "Mostrar senha"}
+                style={{
+                  position: "absolute",
+                  right: 10,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  width: 24,
+                  height: 24,
+                  padding: 0,
+                  border: "none",
+                  background: "transparent",
+                  color: "var(--muted)",
+                  cursor: showPasswordDisabled ? "not-allowed" : "pointer",
+                  display: "grid",
+                  placeItems: "center",
+                }}
+              >
+                {showPassword ? (
+                  <svg
+                    width="18"
+                    height="18"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M2 12C3.9 8.6 7.4 6 12 6C16.6 6 20.1 8.6 22 12C20.1 15.4 16.6 18 12 18C7.4 18 3.9 15.4 2 12Z"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+                  </svg>
+                ) : (
+                  <svg
+                    width="18"
+                    height="18"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M2 12C3.9 8.6 7.4 6 12 6C16.6 6 20.1 8.6 22 12C20.1 15.4 16.6 18 12 18C7.4 18 3.9 15.4 2 12Z"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+                    <path d="M4 4L20 20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                  </svg>
+                )}
+              </button>
+            </div>
 
             <label
               style={{

@@ -1,0 +1,3 @@
+ALTER TABLE "app_config"
+  ADD COLUMN IF NOT EXISTS "mediaRetentionLastMediaCount" INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS "mediaRetentionLastFileCount" INTEGER NOT NULL DEFAULT 0;

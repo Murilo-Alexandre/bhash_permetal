@@ -47,6 +47,19 @@ function parseBoolean(value, fallback = false) {
   return fallback;
 }
 
+function joinCsvUnique(values) {
+  const seen = new Set();
+  const out = [];
+  for (const item of values) {
+    const value = String(item || "").trim();
+    if (!value) continue;
+    if (seen.has(value.toLowerCase())) continue;
+    seen.add(value.toLowerCase());
+    out.push(value);
+  }
+  return out.join(",");
+}
+
 function required(raw, key) {
   const value = String(raw[key] || "").trim();
   if (!value) {
@@ -62,13 +75,18 @@ function buildTenantConfig(rawInput) {
   const companyName = String(raw.COMPANY_NAME || tenantSlug).trim();
   const serverIp = required(raw, "SERVER_IP");
   const chatHost = required(raw, "CHAT_HOST");
-  const adminHost = required(raw, "ADMIN_HOST");
+  const adminHost = String(raw.ADMIN_HOST || "").trim();
+  const adminHttpsEnabled = parseBoolean(raw.ADMIN_HTTPS_ENABLED, !!adminHost);
+  if (adminHttpsEnabled && !adminHost) {
+    throw new Error("ADMIN_HTTPS_ENABLED=true exige ADMIN_HOST preenchido.");
+  }
   const updatesHost = required(raw, "UPDATES_HOST");
   const updatesPathPrefix = normalizePrefix(raw.UPDATES_PATH_PREFIX || "/desktop/win");
   const updatesPublishDir = required(raw, "UPDATES_PUBLISH_DIR");
 
   const chatUrl = String(raw.CHAT_URL || `https://${chatHost}`).trim();
-  const adminUrl = String(raw.ADMIN_URL || `https://${adminHost}`).trim();
+  const adminUrlDefault = adminHttpsEnabled ? `https://${adminHost}` : `http://${serverIp}:5174`;
+  const adminUrl = String(raw.ADMIN_URL || adminUrlDefault).trim();
   const updatesBaseUrl = String(
     raw.DESKTOP_UPDATE_URL || raw.UPDATE_BASE_URL || `https://${updatesHost}${updatesPathPrefix}`
   ).trim();
@@ -80,7 +98,14 @@ function buildTenantConfig(rawInput) {
       }:${raw.DB_PORT || "5432"}/${raw.DB_NAME || "bhash"}`;
 
   const jwtSecret = required(raw, "JWT_SECRET");
-  const corsOrigins = String(raw.CORS_ORIGINS || `${chatUrl},${adminUrl}`).trim();
+  const defaultCorsOrigins = joinCsvUnique([
+    chatUrl,
+    adminUrl,
+    "LAN",
+    "http://localhost:5173",
+    "http://localhost:5174",
+  ]);
+  const corsOrigins = String(raw.CORS_ORIGINS || defaultCorsOrigins).trim();
   const appHost = String(raw.APP_HOST || "0.0.0.0").trim();
   const port = String(raw.PORT || "3000").trim();
   const viteApiBase = String(raw.VITE_API_BASE || "/api").trim();
@@ -96,10 +121,12 @@ function buildTenantConfig(rawInput) {
     raw.NGINX_CHAT_CERT_KEY_PATH || `/etc/ssl/private/${chatHost}.key`
   ).trim();
   const nginxAdminCertPath = String(
-    raw.NGINX_ADMIN_CERT_PATH || `/etc/ssl/certs/${adminHost}.crt`
+    raw.NGINX_ADMIN_CERT_PATH ||
+      (adminHost ? `/etc/ssl/certs/${adminHost}.crt` : "/etc/ssl/certs/admin.local.crt")
   ).trim();
   const nginxAdminCertKeyPath = String(
-    raw.NGINX_ADMIN_CERT_KEY_PATH || `/etc/ssl/private/${adminHost}.key`
+    raw.NGINX_ADMIN_CERT_KEY_PATH ||
+      (adminHost ? `/etc/ssl/private/${adminHost}.key` : "/etc/ssl/private/admin.local.key")
   ).trim();
 
   return {
@@ -109,6 +136,7 @@ function buildTenantConfig(rawInput) {
     serverIp,
     chatHost,
     adminHost,
+    adminHttpsEnabled,
     updatesHost,
     updatesPathPrefix,
     updatesBaseUrl,
@@ -189,6 +217,30 @@ function escapeCaddyPath(value) {
 function makeCaddyfile(config) {
   const prefix = config.updatesPathPrefix;
   const updatesRoot = escapeCaddyPath(config.updatesPublishDir);
+  const adminBlock = config.adminHttpsEnabled
+    ? `
+https://${config.adminHost} {
+    encode zstd gzip
+
+    @api path /api/*
+    handle @api {
+        uri strip_prefix /api
+        reverse_proxy 127.0.0.1:3000
+    }
+
+    @socket path /socket.io/*
+    handle @socket {
+        reverse_proxy 127.0.0.1:3000
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:5174
+    }
+}
+`
+    : `
+# Admin HTTPS desabilitado: usar URL interna ${config.adminUrl}
+`;
 
   return `{
     local_certs
@@ -213,25 +265,7 @@ https://${config.chatHost} {
         reverse_proxy 127.0.0.1:5173
     }
 }
-
-https://${config.adminHost} {
-    encode zstd gzip
-
-    @api path /api/*
-    handle @api {
-        uri strip_prefix /api
-        reverse_proxy 127.0.0.1:3000
-    }
-
-    @socket path /socket.io/*
-    handle @socket {
-        reverse_proxy 127.0.0.1:3000
-    }
-
-    handle {
-        reverse_proxy 127.0.0.1:5174
-    }
-}
+${adminBlock}
 
 https://${config.updatesHost} {
     encode zstd gzip
@@ -245,6 +279,52 @@ https://${config.updatesHost} {
 }
 
 function makeNginxConfig(config) {
+  const redirectHosts = [config.chatHost, config.adminHttpsEnabled ? config.adminHost : ""]
+    .filter(Boolean)
+    .join(" ");
+  const adminServer = config.adminHttpsEnabled
+    ? `
+server {
+  listen 443 ssl http2;
+  server_name ${config.adminHost};
+
+  ssl_certificate     ${config.nginxAdminCertPath};
+  ssl_certificate_key ${config.nginxAdminCertKeyPath};
+
+  client_max_body_size 40m;
+
+  location /socket.io/ {
+    proxy_pass http://127.0.0.1:3000/socket.io/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 600s;
+  }
+
+  location /api/ {
+    proxy_pass http://127.0.0.1:3000/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+
+  location / {
+    proxy_pass http://127.0.0.1:5174/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+`
+    : `
+# Admin HTTPS desabilitado: usar URL interna ${config.adminUrl}
+`;
+
   return `map $http_upgrade $connection_upgrade {
   default upgrade;
   '' close;
@@ -252,7 +332,7 @@ function makeNginxConfig(config) {
 
 server {
   listen 80;
-  server_name ${config.chatHost} ${config.adminHost};
+  server_name ${redirectHosts};
   return 301 https://$host$request_uri;
 }
 
@@ -292,43 +372,7 @@ server {
     proxy_set_header X-Forwarded-Proto $scheme;
   }
 }
-
-server {
-  listen 443 ssl http2;
-  server_name ${config.adminHost};
-
-  ssl_certificate     ${config.nginxAdminCertPath};
-  ssl_certificate_key ${config.nginxAdminCertKeyPath};
-
-  client_max_body_size 40m;
-
-  location /socket.io/ {
-    proxy_pass http://127.0.0.1:3000/socket.io/;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection $connection_upgrade;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_read_timeout 600s;
-  }
-
-  location /api/ {
-    proxy_pass http://127.0.0.1:3000/;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-  }
-
-  location / {
-    proxy_pass http://127.0.0.1:5174/;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-  }
-}
+${adminServer}
 `;
 }
 
@@ -424,6 +468,11 @@ Arquivos gerados:
 - .env
 - Caddyfile.windows
 - nginx.internal.conf
+
+URLs:
+- Chat: ${config.chatUrl}
+- Admin: ${config.adminUrl}
+- Admin HTTPS: ${config.adminHttpsEnabled ? "habilitado" : "desabilitado (admin interno)"}
 
 Passos rapidos no servidor:
 1. Copiar .env para raiz do projeto.

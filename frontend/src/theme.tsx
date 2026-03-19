@@ -8,6 +8,7 @@ type ThemeCtx = {
   toggleTheme: () => void;
 
   primaryColor: string;
+  primaryTextColor: string;
   setPrimaryColor: (color: string) => void;
 
   /** pronta para usar no <img src="..."> */
@@ -26,8 +27,10 @@ const ThemeContext = createContext<ThemeCtx | null>(null);
 
 const THEME_KEY = "bhash_theme";
 const COLOR_KEY = "bhash_primary";
+const PRIMARY_TEXT_COLOR_KEY = "bhash_primary_text";
 
 const DEFAULT_PRIMARY = "#001F3F";
+const DEFAULT_PRIMARY_TEXT = "#F0F0F0";
 const DEFAULT_LOGO = "/logo_bhash.png";
 
 function getInitialTheme(): Theme {
@@ -45,6 +48,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [primaryColor, setPrimaryColorState] = useState<string>(() => {
     return localStorage.getItem(COLOR_KEY) ?? DEFAULT_PRIMARY;
   });
+  const [primaryTextColor, setPrimaryTextColorState] = useState<string>(() => {
+    return localStorage.getItem(PRIMARY_TEXT_COLOR_KEY) ?? DEFAULT_PRIMARY_TEXT;
+  });
 
   // ⚠️ logo NÃO fica no localStorage (pra não “travar” e impedir update do admin)
   const [logoUrlRaw, setLogoUrlRaw] = useState<string | null>(null);
@@ -58,15 +64,19 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     document.documentElement.style.setProperty("--bhash-primary", primaryColor);
+    document.documentElement.style.setProperty("--bhash-primary-fg", primaryTextColor);
     document.documentElement.style.setProperty("--btn-bg", primaryColor);
+    document.documentElement.style.setProperty("--btn-fg", primaryTextColor);
     localStorage.setItem(COLOR_KEY, primaryColor);
-  }, [primaryColor]);
+    localStorage.setItem(PRIMARY_TEXT_COLOR_KEY, primaryTextColor);
+  }, [primaryColor, primaryTextColor]);
 
   async function reloadAppConfig() {
     try {
       const cfg = await fetchAppConfig();
 
       if (cfg?.primaryColor) setPrimaryColorState(cfg.primaryColor);
+      if (cfg?.primaryTextColor) setPrimaryTextColorState(cfg.primaryTextColor);
 
       // se backend manda null => volta pro default
       const resolved = resolveLogoUrl(cfg?.logoUrl);
@@ -94,13 +104,14 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       theme,
       toggleTheme: () => setTheme((t) => (t === "dark" ? "light" : "dark")),
       primaryColor,
+      primaryTextColor,
       setPrimaryColor: (color: string) => setPrimaryColorState(color),
       resolvedLogoUrl,
       logoUrlRaw,
       reloadAppConfig,
       isConfigLoaded,
     }),
-    [theme, primaryColor, resolvedLogoUrl, logoUrlRaw, isConfigLoaded]
+    [theme, primaryColor, primaryTextColor, resolvedLogoUrl, logoUrlRaw, isConfigLoaded]
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;

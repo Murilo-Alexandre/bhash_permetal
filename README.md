@@ -71,6 +71,8 @@ DESKTOP_UPDATE_URL=https://updates.bhash.com/desktop/win
 Para implantar rapido em varias empresas, use o tenant kit:
 
 1. Preencha `deploy/tenant.env` (copie de `deploy/tenant.env.example`).
+   - Para HTTPS apenas no chat: `ADMIN_HTTPS_ENABLED=false`.
+   - Para admin em HTTPS tambem: `ADMIN_HTTPS_ENABLED=true` + `ADMIN_HOST`.
 2. Gere kit server/cliente:
 
 ```bash

@@ -3,7 +3,7 @@ import { useAdminAuth } from "../adminAuth";
 import { useTheme } from "../theme";
 import { API_BASE } from "../api";
 
-type AppConfig = { primaryColor: string; logoUrl?: string | null };
+type AppConfig = { primaryColor: string; primaryTextColor: string; logoUrl?: string | null };
 
 type UploadedLogoItem = {
   name: string;
@@ -20,7 +20,9 @@ type LogosResponse = {
 };
 
 const DEFAULT_PRIMARY = "#001F3F";
+const DEFAULT_PRIMARY_TEXT = "#F0F0F0";
 const COLOR_PRESETS = ["#001F3F", "#0B4E8C", "#1D4ED8", "#0F766E", "#B45309", "#BE123C", "#5B21B6"];
+const TEXT_COLOR_PRESETS = ["#F0F0F0", "#FFFFFF", "#F8FAFC", "#E5E7EB", "#111827", "#0F172A", "#000000"];
 
 export function AdminAppConfigPage() {
   const { api } = useAdminAuth();
@@ -28,6 +30,7 @@ export function AdminAppConfigPage() {
 
   const [cfg, setCfg] = useState<AppConfig | null>(null);
   const [primaryColor, setPrimaryColor] = useState(DEFAULT_PRIMARY);
+  const [primaryTextColor, setPrimaryTextColor] = useState(DEFAULT_PRIMARY_TEXT);
 
   const [logos, setLogos] = useState<UploadedLogoItem[]>([]);
   const [logosLoading, setLogosLoading] = useState(false);
@@ -43,6 +46,14 @@ export function AdminAppConfigPage() {
     return withApiBase(cfg.logoUrl);
   }, [cfg?.logoUrl]);
 
+  const msgScope = useMemo<"logo" | "color" | null>(() => {
+    if (!msg) return null;
+    const lower = msg.toLowerCase();
+    if (lower.includes("logo")) return "logo";
+    if (lower.includes("cor")) return "color";
+    return null;
+  }, [msg]);
+
   useEffect(() => {
     void (async () => {
       try {
@@ -57,8 +68,10 @@ export function AdminAppConfigPage() {
   async function refreshCfgFromApi() {
     const res = await api.get<AppConfig>("/app-config");
     const color = normalizeHexColor(res.data.primaryColor) ?? DEFAULT_PRIMARY;
+    const textColor = normalizeHexColor(res.data.primaryTextColor) ?? DEFAULT_PRIMARY_TEXT;
     setCfg(res.data);
     setPrimaryColor(color);
+    setPrimaryTextColor(textColor);
   }
 
   async function loadUploadedLogos() {
@@ -74,39 +87,52 @@ export function AdminAppConfigPage() {
     }
   }
 
-  async function saveColor() {
+  async function saveColors() {
     const normalized = normalizeHexColor(primaryColor);
+    const normalizedText = normalizeHexColor(primaryTextColor);
     if (!normalized) {
       setMsg("Cor inválida. Use formato #RRGGBB.");
+      return;
+    }
+    if (!normalizedText) {
+      setMsg("Cor do texto/ícone inválida. Use formato #RRGGBB.");
       return;
     }
 
     setSaving(true);
     setMsg(null);
     try {
-      const res = await api.put<AppConfig>("/admin/app-config", { primaryColor: normalized });
+      const res = await api.put<AppConfig>("/admin/app-config", {
+        primaryColor: normalized,
+        primaryTextColor: normalizedText,
+      });
       setCfg(res.data);
       setPrimaryColor(normalized);
-      setMsg("Cor primária atualizada.");
+      setPrimaryTextColor(normalizedText);
+      setMsg("Cores principais atualizadas.");
       await reloadAppConfig();
     } catch (e: any) {
-      setMsg(e?.response?.data?.message ?? "Falha ao salvar cor.");
+      setMsg(e?.response?.data?.message ?? "Falha ao salvar cores.");
     } finally {
       setSaving(false);
     }
   }
 
-  async function resetColorDefault() {
+  async function resetColorsDefault() {
     setSaving(true);
     setMsg(null);
     try {
-      const res = await api.put<AppConfig>("/admin/app-config", { primaryColor: DEFAULT_PRIMARY });
+      const res = await api.put<AppConfig>("/admin/app-config", {
+        primaryColor: DEFAULT_PRIMARY,
+        primaryTextColor: DEFAULT_PRIMARY_TEXT,
+      });
       setCfg(res.data);
       setPrimaryColor(DEFAULT_PRIMARY);
-      setMsg("Cor primária restaurada para o padrão.");
+      setPrimaryTextColor(DEFAULT_PRIMARY_TEXT);
+      setMsg("Cores principais restauradas para o padrão.");
       await reloadAppConfig();
     } catch (e: any) {
-      setMsg(e?.response?.data?.message ?? "Falha ao restaurar cor padrão.");
+      setMsg(e?.response?.data?.message ?? "Falha ao restaurar cores padrão.");
     } finally {
       setSaving(false);
     }
@@ -186,11 +212,11 @@ export function AdminAppConfigPage() {
   }
 
   return (
-    <div className="admin-page">
-      <h1 style={{ margin: 0, marginBottom: 12 }}>Config do App</h1>
+    <div className="admin-page admin-page--appcfg">
+      <h1 className="appcfg-pageTitle">Config do App</h1>
 
       <div className="appcfg-grid">
-        <Card title="Identidade visual" colSpan={8}>
+        <Card title="Identidade visual" colSpan={4} className="appcfg-identityCard">
           <div className="appcfg-currentLogoPanel">
             <div className="appcfg-currentLogoMedia">
               <img
@@ -240,108 +266,170 @@ export function AdminAppConfigPage() {
 
           <div className="appcfg-uploadHint">PNG/JPG/WEBP até 2MB.</div>
 
-          <div className="appcfg-sectionTitle">Logos já enviadas</div>
-          {logosLoading ? (
-            <div className="appcfg-empty">Carregando logos...</div>
-          ) : logos.length === 0 ? (
-            <div className="appcfg-empty">Nenhuma logo personalizada enviada ainda.</div>
-          ) : (
-            <div className="appcfg-logoGrid">
-              {logos.map((item) => {
-                const selecting = logoActionKey === `select:${item.name}`;
-                const deleting = logoActionKey === `delete:${item.name}`;
-                return (
-                  <div key={item.name} className={`appcfg-logoCard ${item.isCurrent ? "is-current" : ""}`}>
-                    <div className="appcfg-logoThumb">
-                      <img src={withApiBase(item.url)} alt={item.name} />
-                    </div>
-
-                    <div className="appcfg-logoDetails">
-                      <div className="appcfg-logoName" title={item.name}>
-                        {item.name}
-                      </div>
-                      <div className="appcfg-logoMeta">
-                        {formatDateTime(item.updatedAt)} • {formatBytes(item.size)}
-                      </div>
-                    </div>
-
-                    <div className="appcfg-logoActions">
-                      <button
-                        className={`appcfg-useBtn ${item.isCurrent ? "is-current" : ""}`}
-                        disabled={item.isCurrent || selecting || deleting}
-                        onClick={() => void setLogoFromGallery(item)}
-                      >
-                        {item.isCurrent ? "Em uso" : selecting ? "Aplicando..." : "Usar"}
-                      </button>
-
-                      <button
-                        className="admin-actionBtn is-danger"
-                        title="Excluir logo"
-                        disabled={selecting || deleting}
-                        onClick={() => void deleteUploadedLogo(item)}
-                      >
-                        <TrashIcon />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+          {msg && msgScope === "logo" ? <div className="appcfg-inlineStatus">{msg}</div> : null}
         </Card>
 
-        <Card title="Cor primária" colSpan={4}>
-          <div className="appcfg-colorPreview">
-            <div className="appcfg-colorSwatch" style={{ background: primaryColor }} />
-            <div className="appcfg-colorText">{primaryColor.toUpperCase()}</div>
-          </div>
+        <Card title="Logos já enviadas" colSpan={4} className="appcfg-galleryCard">
+          <div className="appcfg-galleryBody">
+            {logosLoading ? (
+              <div className="appcfg-empty">Carregando logos...</div>
+            ) : logos.length === 0 ? (
+              <div className="appcfg-empty">Nenhuma logo personalizada enviada ainda.</div>
+            ) : (
+              <div className="appcfg-logoScroller">
+                <div className="appcfg-logoGrid appcfg-logoGrid--stack">
+                  {logos.map((item) => {
+                    const selecting = logoActionKey === `select:${item.name}`;
+                    const deleting = logoActionKey === `delete:${item.name}`;
+                    return (
+                      <div key={item.name} className={`appcfg-logoCard ${item.isCurrent ? "is-current" : ""}`}>
+                        <div
+                          className="appcfg-logoThumb"
+                          role="img"
+                          aria-label={item.name}
+                          style={{ backgroundImage: `url("${withApiBase(item.url)}")` }}
+                        />
 
-          <div className="appcfg-colorInputs">
-            <input
-              type="color"
-              value={normalizeHexColor(primaryColor) ?? DEFAULT_PRIMARY}
-              onChange={(e) => setPrimaryColor(e.target.value.toUpperCase())}
-              className="appcfg-colorPicker"
-            />
-            <input
-              value={primaryColor}
-              onChange={(e) => setPrimaryColor(e.target.value.toUpperCase())}
-              placeholder={DEFAULT_PRIMARY}
-              className="admin-searchField__input"
-            />
-          </div>
+                        <div className="appcfg-logoDetails">
+                          <div className="appcfg-logoName" title={item.name}>
+                            {item.name}
+                          </div>
+                          <div className="appcfg-logoMeta">
+                            {formatDateTime(item.updatedAt)} • {formatBytes(item.size)}
+                          </div>
+                        </div>
 
-          <div className="appcfg-presetRow">
-            {COLOR_PRESETS.map((color) => {
-              const active = (normalizeHexColor(primaryColor) ?? "").toUpperCase() === color.toUpperCase();
-              return (
-                <button
-                  key={color}
-                  className={`appcfg-presetBtn ${active ? "is-active" : ""}`}
-                  title={color}
-                  onClick={() => setPrimaryColor(color)}
+                        <div className="appcfg-logoActions">
+                          <button
+                            className={`appcfg-useBtn ${item.isCurrent ? "is-current" : ""}`}
+                            disabled={item.isCurrent || selecting || deleting}
+                            onClick={() => void setLogoFromGallery(item)}
+                          >
+                            {item.isCurrent ? "Em uso" : selecting ? "Aplicando..." : "Usar"}
+                          </button>
+
+                          <button
+                            className="admin-actionBtn is-danger"
+                            title="Excluir logo"
+                            disabled={selecting || deleting}
+                            onClick={() => void deleteUploadedLogo(item)}
+                          >
+                            <TrashIcon />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        </Card>
+
+        <Card title="" colSpan={4} className="appcfg-colorCard">
+          <div className="appcfg-colorPanel">
+            <section className="appcfg-colorSection">
+              <div className="appcfg-sectionTitle appcfg-sectionTitle--compact">Cor Principal</div>
+
+              <div className="appcfg-colorInputs">
+                <input
+                  type="color"
+                  value={normalizeHexColor(primaryColor) ?? DEFAULT_PRIMARY}
+                  onChange={(e) => setPrimaryColor(e.target.value.toUpperCase())}
+                  className="appcfg-colorPicker"
+                />
+                <input
+                  value={primaryColor}
+                  onChange={(e) => setPrimaryColor(e.target.value.toUpperCase())}
+                  placeholder={DEFAULT_PRIMARY}
+                  className="admin-searchField__input"
+                />
+              </div>
+
+              <div className="appcfg-colorSectionLabel">Cores pré definidas</div>
+              <div className="appcfg-presetRow">
+                {COLOR_PRESETS.map((color) => {
+                  const active = (normalizeHexColor(primaryColor) ?? "").toUpperCase() === color.toUpperCase();
+                  return (
+                    <button
+                      key={color}
+                      className={`appcfg-presetBtn ${active ? "is-active" : ""}`}
+                      title={color}
+                      onClick={() => setPrimaryColor(color)}
+                    >
+                      <span className="appcfg-presetDot" style={{ background: color }} />
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="appcfg-colorSection">
+              <div className="appcfg-sectionTitle appcfg-sectionTitle--compact">Cor principal fonte</div>
+
+              <div className="appcfg-colorInputs">
+                <input
+                  type="color"
+                  value={normalizeHexColor(primaryTextColor) ?? DEFAULT_PRIMARY_TEXT}
+                  onChange={(e) => setPrimaryTextColor(e.target.value.toUpperCase())}
+                  className="appcfg-colorPicker"
+                />
+                <input
+                  value={primaryTextColor}
+                  onChange={(e) => setPrimaryTextColor(e.target.value.toUpperCase())}
+                  placeholder={DEFAULT_PRIMARY_TEXT}
+                  className="admin-searchField__input"
+                />
+              </div>
+
+              <div className="appcfg-colorSectionLabel">Cores pré definidas</div>
+              <div className="appcfg-presetRow appcfg-presetRow--text">
+                {TEXT_COLOR_PRESETS.map((color) => {
+                  const active = (normalizeHexColor(primaryTextColor) ?? "").toUpperCase() === color.toUpperCase();
+                  return (
+                    <button
+                      key={color}
+                      className={`appcfg-presetBtn ${active ? "is-active" : ""}`}
+                      title={color}
+                      onClick={() => setPrimaryTextColor(color)}
+                    >
+                      <span className="appcfg-presetDot" style={{ background: color }} />
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="appcfg-colorSection">
+              <div className="appcfg-sectionTitle appcfg-sectionTitle--compact">Pré Visualização</div>
+
+              <div className="appcfg-colorPreview">
+                <div
+                  className="appcfg-colorSwatch appcfg-colorSwatch--primaryText"
+                  style={{ background: primaryColor, color: primaryTextColor }}
                 >
-                  <span className="appcfg-presetDot" style={{ background: color }} />
-                </button>
-              );
-            })}
-          </div>
+                  Aa
+                </div>
+                <div className="appcfg-colorPreviewInfo">
+                  <div className="appcfg-colorText">{primaryTextColor.toUpperCase()}</div>
+                  <div className="appcfg-colorHint">Texto e ícones sobre componentes com primary color</div>
+                </div>
+              </div>
+            </section>
 
-          <div className="appcfg-actionsRow">
-            <button className="appcfg-primaryBtn" onClick={() => void saveColor()} disabled={saving}>
-              {saving ? "Salvando..." : "Salvar cor"}
-            </button>
-            <button className="appcfg-ghostBtn" onClick={() => void resetColorDefault()} disabled={saving}>
-              Restaurar padrão
-            </button>
+            <div className="appcfg-actionsRow appcfg-actionsRow--colors">
+              <button className="appcfg-primaryBtn" onClick={() => void saveColors()} disabled={saving}>
+                {saving ? "Salvando..." : "Salvar cores"}
+              </button>
+              <button className="appcfg-ghostBtn" onClick={() => void resetColorsDefault()} disabled={saving}>
+                Restaurar padrões
+              </button>
+            </div>
+
+            {msg && msgScope === "color" ? <div className="appcfg-inlineStatus">{msg}</div> : null}
           </div>
         </Card>
 
-        {msg ? (
-          <Card title="Status" colSpan={12}>
-            <div style={{ color: "var(--muted)" }}>{msg}</div>
-          </Card>
-        ) : null}
       </div>
     </div>
   );
@@ -350,15 +438,17 @@ export function AdminAppConfigPage() {
 function Card({
   title,
   colSpan,
+  className,
   children,
 }: {
   title: string;
   colSpan: number;
+  className?: string;
   children: React.ReactNode;
 }) {
   return (
     <div
-      className="admin-card"
+      className={`admin-card ${className ?? ""}`.trim()}
       style={{
         gridColumn: `span ${colSpan}`,
         padding: 16,
@@ -366,9 +456,14 @@ function Card({
         border: "1px solid var(--border)",
         background: "var(--card-bg)",
         boxShadow: "var(--shadow)",
+        minHeight: 0,
+        height: "100%",
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
       }}
     >
-      <div style={{ fontWeight: 900, marginBottom: 12 }}>{title}</div>
+      {title ? <div style={{ fontWeight: 900, marginBottom: 12 }}>{title}</div> : null}
       {children}
     </div>
   );

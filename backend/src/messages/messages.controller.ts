@@ -18,10 +18,12 @@ import { MessagesService } from './messages.service';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import * as path from 'path';
+import * as fs from 'fs';
 import { ChatEventsService } from '../chat/chat-events.service';
+import { isLikelyMediaFile, normalizeUploadedFileName } from '../common/upload-filename.util';
 
 function safeAttachmentExt(original: string) {
-  const ext = path.extname(original || '').toLowerCase();
+  const ext = path.extname(normalizeUploadedFileName(original) || '').toLowerCase();
   return ext || '';
 }
 
@@ -74,21 +76,31 @@ export class MessagesController {
     return this.messages.listMedia(req.user.sub, conversationId, kind, take);
   }
 
+  @Get('conversations/:id/media-retention-policy')
+  mediaRetentionPolicy(
+    @Req() req: any,
+    @Param('id') conversationId: string,
+  ) {
+    return this.messages.getVisibleMediaRetentionPolicy(req.user.sub, conversationId);
+  }
+
   @Post('conversations/:id/messages')
   @UseInterceptors(
     FileInterceptor('file', {
       storage: diskStorage({
         destination: (_req, file, cb) => {
-          const isImage = /^image\//i.test(file.mimetype);
-          const folder = isImage ? 'chat-images' : 'chat-files';
-          cb(null, path.join(process.cwd(), 'public', 'uploads', folder));
+          const isMedia = isLikelyMediaFile(file);
+          const folder = isMedia ? 'chat-media' : 'chat-files';
+          const dir = path.join(process.cwd(), 'public', 'uploads', folder);
+          fs.mkdirSync(dir, { recursive: true });
+          cb(null, dir);
         },
         filename: (_req, file, cb) => {
           const ext = safeAttachmentExt(file.originalname);
           cb(null, `msg_${Date.now()}${ext}`);
         },
       }),
-      limits: { fileSize: 25 * 1024 * 1024 },
+      limits: { fileSize: 250 * 1024 * 1024 },
     }),
   )
   async send(

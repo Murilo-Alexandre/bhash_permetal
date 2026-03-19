@@ -1,9 +1,15 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { normalizeUploadedFileName } from '../common/upload-filename.util';
 
 @Injectable()
 export class ConversationsService {
   constructor(private readonly prisma: PrismaService) {}
+
+  private normalizeAttachmentName(value?: string | null) {
+    const normalized = normalizeUploadedFileName(value);
+    return normalized || null;
+  }
 
   private normalizePair(a: string, b: string) {
     return a < b ? [a, b] : [b, a];
@@ -193,6 +199,7 @@ export class ConversationsService {
           lastMessage: lastMessage
             ? {
                 ...lastMessage,
+                attachmentName: this.normalizeAttachmentName(lastMessage.attachmentName),
                 isFavorited: lastMessage.favorites.length > 0,
               }
             : null,

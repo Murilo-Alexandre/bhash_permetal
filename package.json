@@ -30,6 +30,8 @@
     "services:resurrect": "pm2 resurrect",
     "server:deploy": "npm run setup:server && npm run services:start && npm run services:save",
     "server:update": "npm run build:all && npm run services:reload && npm run services:save",
+    "server:startup:install": "powershell -ExecutionPolicy Bypass -File .\\scripts\\windows\\install-server-startup-tasks.ps1",
+    "server:startup:remove": "powershell -ExecutionPolicy Bypass -File .\\scripts\\windows\\remove-server-startup-tasks.ps1",
     "desktop:install": "npm --prefix desktop-electron install",
     "desktop:dev": "npm run env:init && npm --prefix desktop-electron run dev",
     "desktop:start": "npm run env:init && npm --prefix desktop-electron run start",

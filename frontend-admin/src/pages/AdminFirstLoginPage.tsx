@@ -10,7 +10,7 @@ type Me = {
 };
 
 export function AdminFirstLoginPage() {
-  const { api, logout } = useAdminAuth();
+  const { api, logout, logoff } = useAdminAuth();
 
   const [me, setMe] = useState<Me | null>(null);
   const [username, setUsername] = useState("");
@@ -49,7 +49,7 @@ export function AdminFirstLoginPage() {
       setMsg("✅ Credenciais atualizadas. Faça login novamente…");
 
       // 🔒 mata token antigo (evita inconsistência)
-      setTimeout(() => logout(), 700);
+      setTimeout(() => logoff(), 700);
     } catch (e: any) {
       setMsg(e?.response?.data?.message ?? "Falha ao atualizar credenciais");
     } finally {

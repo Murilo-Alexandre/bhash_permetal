@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useAdminAuth } from "../adminAuth";
 
 type Ping = { ok: boolean; scope: string };
-type AppConfig = { primaryColor: string; logoUrl?: string | null };
+type AppConfig = { primaryColor: string; primaryTextColor: string; logoUrl?: string | null };
 
 export function AdminDashboard() {
   const { api, logout } = useAdminAuth();
@@ -47,6 +47,22 @@ export function AdminDashboard() {
               <div>
                 <div style={{ fontWeight: 900 }}>{cfg?.primaryColor ?? "..."}</div>
                 <div style={{ color: "var(--muted)", fontSize: 13 }}>primaryColor</div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <div
+                style={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: 4,
+                  background: cfg?.primaryTextColor ?? "#F0F0F0",
+                  border: "1px solid var(--border)",
+                }}
+              />
+              <div>
+                <div style={{ fontWeight: 900 }}>{cfg?.primaryTextColor ?? "#F0F0F0"}</div>
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>primaryTextColor</div>
               </div>
             </div>
 

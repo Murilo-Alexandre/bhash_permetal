@@ -24,7 +24,7 @@ type Contact = {
 type ConversationItem = {
   id: string;
   updatedAt: string;
-  otherUser: { id: string; username: string; name: string };
+  otherUser: { id: string; username: string; name: string; avatarUrl?: string | null };
   lastMessage:
     | {
         id: string;
@@ -41,7 +41,13 @@ type Message = {
   conversationId: string;
   senderId: string;
   body: string | null;
-  sender: { id: string; username: string; name: string };
+  contentType?: "TEXT" | "IMAGE" | "FILE";
+  attachmentUrl?: string | null;
+  attachmentName?: string | null;
+  attachmentMime?: string | null;
+  attachmentSize?: number | null;
+  deletedAt?: string | null;
+  sender: { id: string; username: string; name: string } | null;
 };
 
 type PagedContacts = {
@@ -75,6 +81,33 @@ type ViewMode = "contacts" | "userConversations" | "conversation";
 
 type SearchMode = "normal" | "exact";
 type OrgFilterItem = { id: string; name: string };
+type RetentionIntervalUnit = "DAY" | "MONTH" | "YEAR";
+type RetentionPolicy = {
+  enabled: boolean;
+  interval: string;
+  intervalLabel: string;
+  intervalCount: number;
+  intervalUnit: RetentionIntervalUnit;
+  runHour: number;
+  runMinute: number;
+  showToUsers: boolean;
+  nextRunAt?: string | null;
+  lastRunAt?: string | null;
+  lastMediaCount?: number;
+  lastFileCount?: number;
+  nextMediaCount?: number;
+  nextFileCount?: number;
+  lastSummary?: string | null;
+};
+
+type RetentionDraft = {
+  enabled: boolean;
+  intervalUnit: RetentionIntervalUnit;
+  intervalCount: string;
+  runHour: string;
+  runMinute: string;
+  showToUsers: boolean;
+};
 type PresenceSnapshotPayload = {
   onlineUserIds?: string[];
   lastLoginByUserId?: Record<string, string>;
@@ -197,9 +230,216 @@ function compareAlpha(a?: string | null, b?: string | null) {
 }
 
 function contactAvatarUrl(raw?: string | null) {
+  return toAbsoluteUrl(raw);
+}
+
+function toAbsoluteUrl(raw?: string | null) {
   if (!raw) return null;
-  if (/^(https?:)?\/\//i.test(raw) || raw.startsWith("data:") || raw.startsWith("blob:")) return raw;
+  if (raw.startsWith("data:") || raw.startsWith("blob:")) return raw;
+  if (/^(https?:)?\/\//i.test(raw)) {
+    try {
+      const resolved = new URL(raw, typeof window !== "undefined" ? window.location.origin : "http://localhost");
+      const isLoopbackHost = /^(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|::1|\[::1\])$/i.test(
+        resolved.hostname
+      );
+      if (!isLoopbackHost) return resolved.toString();
+
+      const apiResolved = new URL(
+        API_BASE,
+        typeof window !== "undefined" ? window.location.origin : "http://localhost:3000"
+      );
+      return `${apiResolved.origin}${resolved.pathname}${resolved.search}${resolved.hash}`;
+    } catch {
+      return raw;
+    }
+  }
   return raw.startsWith("/") ? `${API_BASE}${raw}` : `${API_BASE}/${raw}`;
+}
+
+function formatBytes(bytes?: number | null) {
+  if (!bytes || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx += 1;
+  }
+  const precision = idx === 0 ? 0 : value < 10 ? 1 : 0;
+  return `${value.toFixed(precision)} ${units[idx]}`;
+}
+
+const ATTACHMENT_MOJIBAKE_MARKERS = /[ÃÂ�]/u;
+
+function attachmentMojibakeScore(value: string) {
+  let score = 0;
+  for (const char of value) {
+    if (char === "�") score += 4;
+    if (char === "Ã" || char === "Â") score += 2;
+  }
+  return score;
+}
+
+function decodeLatin1AsUtf8(value: string) {
+  if (typeof TextDecoder === "undefined") return value;
+  const bytes = Uint8Array.from([...value].map((char) => char.charCodeAt(0) & 0xff));
+  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+}
+
+function normalizeAttachmentDisplayName(value?: string | null) {
+  const raw = String(value ?? "").replace(/\0/g, "").trim();
+  if (!raw) return "";
+
+  const normalized = raw.normalize("NFC");
+  if (!ATTACHMENT_MOJIBAKE_MARKERS.test(normalized)) return normalized;
+
+  try {
+    const decoded = decodeLatin1AsUtf8(normalized).replace(/\0/g, "").trim().normalize("NFC");
+    if (!decoded) return normalized;
+    return attachmentMojibakeScore(decoded) < attachmentMojibakeScore(normalized) ? decoded : normalized;
+  } catch {
+    return normalized;
+  }
+}
+
+function isPdfAttachment(message: Partial<Message>) {
+  const mime = String(message.attachmentMime ?? "").toLowerCase();
+  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  return mime.includes("pdf") || name.endsWith(".pdf") || url.includes(".pdf");
+}
+
+function isImageAttachment(message: Partial<Message>) {
+  const mime = String(message.attachmentMime ?? "").toLowerCase();
+  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  return message.contentType === "IMAGE" || mime.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|svg|heic|heif|avif)([?#]|$)/i.test(name) || /\.(png|jpe?g|webp|gif|bmp|svg|heic|heif|avif)([?#]|$)/i.test(url);
+}
+
+function isVideoAttachment(message: Partial<Message>) {
+  const mime = String(message.attachmentMime ?? "").toLowerCase();
+  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  return mime.startsWith('video/') || /\.(mp4|webm|ogg|ogv|mov|m4v|avi|mkv|3gp|mpeg?|mpg|wmv)([?#]|$)/i.test(name) || /\.(mp4|webm|ogg|ogv|mov|m4v|avi|mkv|3gp|mpeg?|mpg|wmv)([?#]|$)/i.test(url);
+}
+
+function isMediaAttachment(message: Partial<Message>) {
+  return isVideoAttachment(message) || isImageAttachment(message);
+}
+
+function buildPdfPreviewUrl(raw?: string | null) {
+  const absolute = toAbsoluteUrl(raw);
+  if (!absolute) return null;
+  const [base] = absolute.split("#");
+  return `${base}#toolbar=0&navpanes=0&scrollbar=0&page=1&view=FitH`;
+}
+
+function attachmentDownloadName(message: Partial<Message>) {
+  const normalized = normalizeAttachmentDisplayName(message.attachmentName);
+  if (normalized) return normalized;
+  if (isVideoAttachment(message)) return "video";
+  if (isImageAttachment(message)) return "imagem";
+  return "arquivo";
+}
+
+async function triggerBrowserDownload(url: string, filename: string) {
+  try {
+    const res = await fetch(url, { credentials: "include" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 2000);
+    return;
+  } catch {}
+
+  const fallback = document.createElement("a");
+  fallback.href = url;
+  fallback.download = filename;
+  fallback.target = "_blank";
+  fallback.rel = "noreferrer";
+  document.body.appendChild(fallback);
+  fallback.click();
+  fallback.remove();
+}
+
+function timeDigitsOnly(value: string) {
+  return (value ?? "").replace(/\D/g, "").slice(0, 2);
+}
+
+function normalizeHourInput(value: string) {
+  const digits = timeDigitsOnly(value);
+  if (!digits) return "00";
+  const num = Number(digits);
+  const safe = Number.isFinite(num) ? Math.min(23, Math.max(0, num)) : 0;
+  return String(safe).padStart(2, "0");
+}
+
+function normalizeMinuteInput(value: string) {
+  const digits = timeDigitsOnly(value);
+  if (!digits) return "00";
+  const num = Number(digits);
+  const safe = Number.isFinite(num) ? Math.min(59, Math.max(0, num)) : 0;
+  return String(safe).padStart(2, "0");
+}
+
+function twoDigits(value: number | string) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "00";
+  return String(Math.max(0, Math.trunc(num))).padStart(2, "0");
+}
+
+function intervalCountDigitsOnly(value: string) {
+  return (value ?? "").replace(/\D/g, "").slice(0, 3);
+}
+
+function normalizeIntervalCountInput(value: string) {
+  const digits = intervalCountDigitsOnly(value);
+  if (!digits) return "1";
+  const num = Number(digits);
+  const safe = Number.isFinite(num) ? Math.min(999, Math.max(1, num)) : 1;
+  return String(safe);
+}
+
+function messageSearchableText(msg: Partial<Message>) {
+  const kind =
+    isMediaAttachment(msg)
+      ? isVideoAttachment(msg)
+        ? "video"
+        : "imagem"
+      : msg.contentType === "FILE"
+      ? "arquivo"
+      : "";
+  return [msg.body ?? "", normalizeAttachmentDisplayName(msg.attachmentName), kind].join(" ").trim();
+}
+
+function messagePreviewText(msg: Partial<Message>) {
+  const body = (msg.body ?? "").trim();
+  if (body) return body;
+  if (isMediaAttachment(msg)) return isVideoAttachment(msg) ? "Vídeo" : "Imagem";
+  const attachmentName = normalizeAttachmentDisplayName(msg.attachmentName);
+  if (msg.contentType === "FILE") return attachmentName ? `Arquivo: ${attachmentName}` : "Arquivo";
+  return "";
+}
+
+const REMOVED_ATTACHMENT_NOTICE_GENERIC =
+  "Esta imagem ou documento foi apagado pelo administrador segundo a política de backup de arquivos.";
+const REMOVED_ATTACHMENT_NOTICE_IMAGE =
+  "Essa imagem foi apagada pelo administrador segundo a política de backup de arquivos.";
+const REMOVED_ATTACHMENT_NOTICE_FILE =
+  "Esse documento foi apagado pelo administrador segundo a política de backup de arquivos.";
+
+function stripAttachmentRemovalNotice(value?: string | null) {
+  let text = (value ?? "").trim();
+  text = text.replace(REMOVED_ATTACHMENT_NOTICE_IMAGE, "");
+  text = text.replace(REMOVED_ATTACHMENT_NOTICE_FILE, "");
+  text = text.replace(REMOVED_ATTACHMENT_NOTICE_GENERIC, "");
+  return text.trim();
 }
 
 function FilterIcon() {
@@ -259,6 +499,7 @@ export function AdminHistoryPage() {
   const [mode, setMode] = useState<ViewMode>("contacts");
   const [isMobileLayout, setIsMobileLayout] = useState(() => window.innerWidth <= 900);
   const [contactsFiltersOpen, setContactsFiltersOpen] = useState(() => window.innerWidth > 900);
+  const [conversationViewportHeight, setConversationViewportHeight] = useState<number | null>(null);
 
   // ====== CONTATOS ======
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -266,6 +507,7 @@ export function AdminHistoryPage() {
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsMsg, setContactsMsg] = useState<string | null>(null);
   const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(() => new Set());
+  const [brokenAvatarIds, setBrokenAvatarIds] = useState<Set<string>>(() => new Set());
 
   const [companyId, setCompanyId] = useState("");
   const [departmentId, setDepartmentId] = useState("");
@@ -292,6 +534,29 @@ export function AdminHistoryPage() {
   const [hasMore, setHasMore] = useState(true);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatMsg, setChatMsg] = useState<string | null>(null);
+  const [mediaItems, setMediaItems] = useState<Message[]>([]);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [mediaMsg, setMediaMsg] = useState<string | null>(null);
+  const [removingAttachmentId, setRemovingAttachmentId] = useState<string | null>(null);
+  const [mediaTab, setMediaTab] = useState<"image" | "file">("image");
+  const [mediaPreviewSlots, setMediaPreviewSlots] = useState(6);
+  const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
+  const [mediaLibraryTab, setMediaLibraryTab] = useState<"image" | "file">("image");
+  const [newMsgsCount, setNewMsgsCount] = useState(0);
+  const [showJumpNew, setShowJumpNew] = useState(false);
+
+  const [retentionPolicy, setRetentionPolicy] = useState<RetentionPolicy | null>(null);
+  const [retentionDraft, setRetentionDraft] = useState<RetentionDraft | null>(null);
+  const [retentionLoading, setRetentionLoading] = useState(false);
+  const [retentionSaving, setRetentionSaving] = useState(false);
+  const [retentionMsg, setRetentionMsg] = useState<string | null>(null);
+
+  const [imageViewerOpen, setImageViewerOpen] = useState(false);
+  const [imageViewerItems, setImageViewerItems] = useState<Message[]>([]);
+  const [imageViewerIndex, setImageViewerIndex] = useState(0);
+  const [imageViewerZoom, setImageViewerZoom] = useState(1);
+  const [imageViewerOffset, setImageViewerOffset] = useState({ x: 0, y: 0 });
+  const [imageViewerDragging, setImageViewerDragging] = useState(false);
 
   // ====== Busca WhatsApp-like dentro do chat ======
   const [chatSearchOpen, setChatSearchOpen] = useState(false);
@@ -301,12 +566,22 @@ export function AdminHistoryPage() {
   const [chatSearchErr, setChatSearchErr] = useState<string | null>(null);
   const [chatSearchHits, setChatSearchHits] = useState<Message[]>([]);
   const [chatSearchNextCursor, setChatSearchNextCursor] = useState<string | null>(null);
+  const [chatSearchActiveIndex, setChatSearchActiveIndex] = useState(-1);
 
   // ====== “scroll pra mensagem” e destaque persistente ======
   const [pendingScrollToId, setPendingScrollToId] = useState<string | null>(null);
   const [highlightTerm, setHighlightTerm] = useState<string>("");
 
   const listRef = useRef<HTMLDivElement | null>(null);
+  const pageRef = useRef<HTMLDivElement | null>(null);
+  const mediaPreviewHostRef = useRef<HTMLDivElement | null>(null);
+  const imageViewerDragRef = useRef<{
+    active: boolean;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  } | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const presenceSocketRef = useRef<Socket | null>(null);
 
@@ -319,6 +594,25 @@ export function AdminHistoryPage() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  useEffect(() => {
+    if (mode !== "conversation") {
+      setConversationViewportHeight(null);
+      return;
+    }
+
+    const compute = () => {
+      const host = pageRef.current;
+      if (!host) return;
+      const top = host.getBoundingClientRect().top;
+      const available = Math.floor(window.innerHeight - top - 8);
+      setConversationViewportHeight(Math.max(420, available));
+    };
+
+    compute();
+    window.addEventListener("resize", compute);
+    return () => window.removeEventListener("resize", compute);
+  }, [mode]);
 
   useEffect(() => {
     if (!token) {
@@ -391,9 +685,12 @@ export function AdminHistoryPage() {
     }
   }
 
-  async function loadContacts() {
-    setContactsLoading(true);
-    setContactsMsg(null);
+  async function loadContacts(opts?: { silent?: boolean }) {
+    const silent = !!opts?.silent;
+    if (!silent) {
+      setContactsLoading(true);
+      setContactsMsg(null);
+    }
     try {
       const params: any = { page: 1, pageSize: 60 };
 
@@ -405,13 +702,28 @@ export function AdminHistoryPage() {
 
       const res = await api.get<PagedContacts>("/admin/history/contacts", { params });
       setContacts(res.data.items ?? []);
+      setBrokenAvatarIds(new Set());
     } catch (e: any) {
       if (e?.response?.status === 401) return logout();
-      setContactsMsg(e?.response?.data?.message ?? "Falha ao carregar contatos");
-      setContacts([]);
+      if (!silent) {
+        setContactsMsg(e?.response?.data?.message ?? "Falha ao carregar contatos");
+        setContacts([]);
+        setBrokenAvatarIds(new Set());
+      }
     } finally {
-      setContactsLoading(false);
+      if (!silent) {
+        setContactsLoading(false);
+      }
     }
+  }
+
+  function markAvatarBroken(userId: string) {
+    setBrokenAvatarIds((prev) => {
+      if (prev.has(userId)) return prev;
+      const next = new Set(prev);
+      next.add(userId);
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -428,9 +740,58 @@ export function AdminHistoryPage() {
 
   useEffect(() => {
     if (mode !== "contacts") return;
+    const timer = window.setInterval(() => {
+      if (contactsLoading) return;
+      void loadContacts({ silent: true });
+    }, 15000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, contactsLoading]);
+
+  useEffect(() => {
+    if (mode !== "contacts") return;
     void loadContactFilters();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "contacts") return;
+    void loadRetentionPolicy();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "contacts") return;
+    const timer = window.setInterval(() => {
+      if (retentionSaving) return;
+      void loadRetentionPolicy({ silent: true, preserveDraft: true });
+    }, 15000);
+
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, retentionSaving]);
+
+  useEffect(() => {
+    if (mode !== "userConversations") return;
+    if (!selectedUser?.id) return;
+    const timer = window.setInterval(() => {
+      if (userConvsLoading) return;
+      void loadUserConversations(selectedUser.id, { silent: true });
+    }, 15000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, selectedUser?.id, userConvsLoading]);
+
+  useEffect(() => {
+    if (mode !== "conversation") return;
+    if (!selectedConv?.id) return;
+    const timer = window.setInterval(() => {
+      if (mediaLoading) return;
+      void loadConversationMedia(selectedConv.id, { silent: true });
+    }, 10000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, selectedConv?.id, mediaLoading]);
 
   const filteredContacts = useMemo(() => {
     const q = normalizeText(contactsQ.trim());
@@ -518,24 +879,34 @@ export function AdminHistoryPage() {
   }, [globalQ, globalMode, mode]);
 
   // ====== LOAD CONVERSAS DO USER ======
-  async function openUser(u: Contact) {
-    setSelectedUser(u);
-    setMode("userConversations");
-
-    setUserConvsLoading(true);
-    setUserConvsMsg(null);
+  async function loadUserConversations(userId: string, opts?: { silent?: boolean }) {
+    const silent = !!opts?.silent;
+    if (!silent) {
+      setUserConvsLoading(true);
+      setUserConvsMsg(null);
+    }
     try {
       const res = await api.get<{ ok: boolean; items: ConversationItem[] }>(
-        `/admin/history/users/${u.id}/conversations`
+        `/admin/history/users/${userId}/conversations`
       );
       setUserConvs(res.data.items ?? []);
     } catch (e: any) {
       if (e?.response?.status === 401) return logout();
-      setUserConvsMsg(e?.response?.data?.message ?? "Falha ao carregar conversas");
-      setUserConvs([]);
+      if (!silent) {
+        setUserConvsMsg(e?.response?.data?.message ?? "Falha ao carregar conversas");
+        setUserConvs([]);
+      }
     } finally {
-      setUserConvsLoading(false);
+      if (!silent) {
+        setUserConvsLoading(false);
+      }
     }
+  }
+
+  async function openUser(u: Contact) {
+    setSelectedUser(u);
+    setMode("userConversations");
+    await loadUserConversations(u.id);
   }
 
   // ====== CHAT (mensagens) ======
@@ -557,6 +928,127 @@ export function AdminHistoryPage() {
       }
     );
     return res.data;
+  }
+
+  async function loadConversationMedia(conversationId: string, opts?: { silent?: boolean }) {
+    const silent = !!opts?.silent;
+    if (!silent) {
+      setMediaLoading(true);
+      setMediaMsg(null);
+    }
+    try {
+      const res = await api.get<{ ok: boolean; items: Message[] }>(
+        `/admin/history/conversations/${conversationId}/media`,
+        { params: { take: 600 } }
+      );
+      setMediaItems(res.data.items ?? []);
+    } catch (e: any) {
+      if (e?.response?.status === 401) return logout();
+      if (!silent) {
+        setMediaMsg(e?.response?.data?.message ?? "Falha ao carregar anexos da conversa");
+        setMediaItems([]);
+      }
+    } finally {
+      if (!silent) {
+        setMediaLoading(false);
+      }
+    }
+  }
+
+  async function loadRetentionPolicy(opts?: { silent?: boolean; preserveDraft?: boolean }) {
+    const silent = !!opts?.silent;
+    const preserveDraft = !!opts?.preserveDraft;
+
+    if (!silent) {
+      setRetentionLoading(true);
+      setRetentionMsg(null);
+    }
+
+    try {
+      const res = await api.get<{ ok: boolean; policy: RetentionPolicy }>("/admin/history/retention-policy");
+      const p = res.data.policy;
+      setRetentionPolicy(p);
+
+      const nextDraft: RetentionDraft = {
+        enabled: p.enabled,
+        intervalUnit: p.intervalUnit,
+        intervalCount: String(p.intervalCount ?? 1),
+        runHour: twoDigits(p.runHour),
+        runMinute: twoDigits(p.runMinute),
+        showToUsers: p.showToUsers,
+      };
+
+      if (preserveDraft) {
+        setRetentionDraft((prev) => prev ?? nextDraft);
+      } else {
+        setRetentionDraft(nextDraft);
+      }
+    } catch (e: any) {
+      if (e?.response?.status === 401) return logout();
+      if (!silent) {
+        setRetentionMsg(e?.response?.data?.message ?? "Falha ao carregar política de exclusão automática");
+        setRetentionPolicy(null);
+        setRetentionDraft(null);
+      }
+    } finally {
+      if (!silent) {
+        setRetentionLoading(false);
+      }
+    }
+  }
+
+  async function saveRetentionPolicy() {
+    if (!retentionDraft) return;
+    setRetentionSaving(true);
+    setRetentionMsg(null);
+    const normalizedIntervalCount = normalizeIntervalCountInput(retentionDraft.intervalCount);
+    const normalizedHour = normalizeHourInput(retentionDraft.runHour);
+    const normalizedMinute = normalizeMinuteInput(retentionDraft.runMinute);
+    const payload = {
+      enabled: retentionDraft.enabled,
+      interval: retentionDraft.intervalUnit === "DAY" ? "DAILY" : retentionDraft.intervalUnit === "MONTH" ? "MONTHLY" : "YEARLY",
+      intervalCount: Number(normalizedIntervalCount),
+      runHour: Number(normalizedHour),
+      runMinute: Number(normalizedMinute),
+      showToUsers: retentionDraft.showToUsers,
+    };
+    try {
+      const res = await api.put<{ ok: boolean; policy: RetentionPolicy }>("/admin/history/retention-policy", payload);
+      const p = res.data.policy;
+      setRetentionPolicy(p);
+      setRetentionDraft({
+        enabled: p.enabled,
+        intervalUnit: p.intervalUnit,
+        intervalCount: String(p.intervalCount ?? 1),
+        runHour: twoDigits(p.runHour),
+        runMinute: twoDigits(p.runMinute),
+        showToUsers: p.showToUsers,
+      });
+      setRetentionMsg("Política salva com sucesso.");
+    } catch (e: any) {
+      if (e?.response?.status === 401) return logout();
+      setRetentionMsg(e?.response?.data?.message ?? "Falha ao salvar política de exclusão automática");
+    } finally {
+      setRetentionSaving(false);
+    }
+  }
+
+  function updateRetentionDraft(patch: Partial<RetentionDraft>) {
+    setRetentionDraft((prev) => (prev ? { ...prev, ...patch } : prev));
+  }
+
+  function normalizeRetentionDraftTime(field: "runHour" | "runMinute") {
+    setRetentionDraft((prev) => {
+      if (!prev) return prev;
+      if (field === "runHour") {
+        return { ...prev, runHour: normalizeHourInput(prev.runHour) };
+      }
+      return { ...prev, runMinute: normalizeMinuteInput(prev.runMinute) };
+    });
+  }
+
+  function normalizeRetentionDraftIntervalCount() {
+    setRetentionDraft((prev) => (prev ? { ...prev, intervalCount: normalizeIntervalCountInput(prev.intervalCount) } : prev));
   }
 
   async function loadFirstPage(
@@ -687,6 +1179,101 @@ export function AdminHistoryPage() {
     }
   }
 
+  function normalizeMediaItems(items: Message[]) {
+    return [...items]
+      .filter((item) => isMediaAttachment(item) && !!item.attachmentUrl)
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  }
+
+  function clampViewerZoom(value: number) {
+    return Math.min(4, Math.max(1, Number.isFinite(value) ? value : 1));
+  }
+
+  function resetImageViewerTransform() {
+    imageViewerDragRef.current = null;
+    setImageViewerZoom(1);
+    setImageViewerOffset({ x: 0, y: 0 });
+    setImageViewerDragging(false);
+  }
+
+  function setViewerZoom(nextZoom: number) {
+    const safe = clampViewerZoom(nextZoom);
+    setImageViewerZoom(safe);
+    if (safe <= 1) {
+      setImageViewerOffset({ x: 0, y: 0 });
+      setImageViewerDragging(false);
+    }
+  }
+
+  function openImageViewer(message: Message) {
+    const items = normalizeMediaItems(mediaItems.length ? mediaItems : messages);
+    if (!items.length) return;
+    const idx = items.findIndex((item) => item.id === message.id);
+    setImageViewerItems(items);
+    setImageViewerIndex(idx >= 0 ? idx : 0);
+    setImageViewerOpen(true);
+    resetImageViewerTransform();
+  }
+
+  function closeImageViewer() {
+    setImageViewerOpen(false);
+    resetImageViewerTransform();
+  }
+
+  function goImage(offset: number) {
+    setImageViewerIndex((prev) => {
+      const next = prev + offset;
+      if (next < 0 || next >= imageViewerItems.length) return prev;
+      resetImageViewerTransform();
+      return next;
+    });
+  }
+
+  async function jumpToMessage(messageId: string) {
+    if (!selectedConv?.id) return;
+    setMediaLibraryOpen(false);
+    if (imageViewerOpen) {
+      closeImageViewer();
+    }
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    setPendingScrollToId(messageId);
+    await ensureMessageLoaded(selectedConv.id, messageId);
+  }
+
+  async function downloadAttachment(message: Partial<Message>) {
+    const absoluteUrl = toAbsoluteUrl(message.attachmentUrl);
+    if (!absoluteUrl) return;
+    await triggerBrowserDownload(absoluteUrl, attachmentDownloadName(message));
+  }
+
+  async function removeAttachment(message: Message) {
+    if (!selectedConv?.id) return;
+    if (!message.attachmentUrl) return;
+
+    const ok = window.confirm("Excluir este arquivo/imagem do servidor e da conversa?");
+    if (!ok) return;
+
+    setRemovingAttachmentId(message.id);
+    setChatMsg(null);
+    try {
+      const res = await api.delete<{ ok: boolean; message: Message }>(
+        `/admin/history/messages/${message.id}/attachment`
+      );
+      const updated = res.data.message;
+
+      setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+      setChatSearchHits((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+      setMediaItems((prev) => prev.filter((m) => m.id !== updated.id));
+      setImageViewerItems((prev) => prev.filter((m) => m.id !== updated.id));
+      setRetentionMsg(null);
+    } catch (e: any) {
+      if (e?.response?.status === 401) return logout();
+      setChatMsg(e?.response?.data?.message ?? "Falha ao excluir anexo");
+    } finally {
+      setRemovingAttachmentId(null);
+    }
+  }
+
   async function openConversation(conv: ConversationItem) {
     setSelectedConv(conv);
     setMode("conversation");
@@ -696,11 +1283,23 @@ export function AdminHistoryPage() {
     setChatSearchHits([]);
     setChatSearchNextCursor(null);
     setChatSearchErr(null);
+    setChatSearchActiveIndex(-1);
 
     setHighlightTerm("");
     setPendingScrollToId(null);
+    setMediaTab("image");
+    setMediaLibraryTab("image");
+    setMediaLibraryOpen(false);
+    setImageViewerOpen(false);
+    setImageViewerItems([]);
+    setImageViewerIndex(0);
+    setNewMsgsCount(0);
+    setShowJumpNew(false);
 
-    await loadFirstPage(conv.id, { scrollToBottom: true });
+    await Promise.all([
+      loadFirstPage(conv.id, { scrollToBottom: true }),
+      loadConversationMedia(conv.id),
+    ]);
   }
 
   // ====== Abrir conversa via busca global ======
@@ -723,14 +1322,24 @@ export function AdminHistoryPage() {
 
     setHighlightTerm(globalQ.trim());
     setPendingScrollToId(hit.id);
+    setMediaTab("image");
+    setMediaLibraryTab("image");
+    setMediaLibraryOpen(false);
+    setNewMsgsCount(0);
+    setShowJumpNew(false);
 
     setChatSearchOpen(false);
     setChatSearchQ("");
     setChatSearchHits([]);
     setChatSearchNextCursor(null);
     setChatSearchErr(null);
+    setChatSearchActiveIndex(-1);
+    setImageViewerOpen(false);
+    setImageViewerItems([]);
+    setImageViewerIndex(0);
 
     const first = await loadFirstPage(conv.id, { scrollToBottom: false });
+    await Promise.all([loadConversationMedia(conv.id)]);
 
     await ensureMessageLoaded(conv.id, hit.id, {
       initialItems: first.items,
@@ -753,19 +1362,43 @@ export function AdminHistoryPage() {
 
     s.on("message:new", (msg: Message) => {
       if (msg?.conversationId !== selectedConv.id) return;
+      const el = listRef.current;
+      const distanceFromBottom = el ? el.scrollHeight - (el.scrollTop + el.clientHeight) : 0;
+      const nearBottom = !el || distanceFromBottom < 140;
 
       setMessages((prev) => {
         if (prev.some((m) => m.id === msg.id)) return prev;
         return [...prev, msg];
       });
 
-      requestAnimationFrame(() => {
-        const el = listRef.current;
-        if (!el) return;
+      if ((msg.contentType === "IMAGE" || msg.contentType === "FILE") && msg.attachmentUrl && !msg.deletedAt) {
+        setMediaItems((prev) => {
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          return [msg, ...prev];
+        });
+      }
 
-        const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
-        const nearBottom = distanceFromBottom < 140;
-        if (nearBottom) el.scrollTop = el.scrollHeight;
+      requestAnimationFrame(() => {
+        const target = listRef.current;
+        if (nearBottom) {
+          setShowJumpNew(false);
+          setNewMsgsCount(0);
+          if (target) target.scrollTop = target.scrollHeight;
+        } else {
+          setShowJumpNew(true);
+          setNewMsgsCount((prev) => prev + 1);
+        }
+      });
+    });
+
+    s.on("message:updated", (msg: Message) => {
+      if (msg?.conversationId !== selectedConv.id) return;
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? msg : m)));
+      setChatSearchHits((prev) => prev.map((m) => (m.id === msg.id ? msg : m)));
+      setMediaItems((prev) => {
+        const hasMedia = (msg.contentType === "IMAGE" || msg.contentType === "FILE") && !!msg.attachmentUrl && !msg.deletedAt;
+        if (!hasMedia) return prev.filter((m) => m.id !== msg.id);
+        return prev.some((m) => m.id === msg.id) ? prev.map((m) => (m.id === msg.id ? msg : m)) : [msg, ...prev];
       });
     });
 
@@ -782,10 +1415,12 @@ export function AdminHistoryPage() {
     if (!selectedConv?.id) return;
 
     const q = chatSearchQ.trim();
+    const effectiveSearchMode: SearchMode = isMobileLayout ? "normal" : chatSearchMode;
     if (!q) {
       setChatSearchErr(null);
       setChatSearchHits([]);
       setChatSearchNextCursor(null);
+      setChatSearchActiveIndex(-1);
       setChatSearchLoading(false);
       return;
     }
@@ -794,6 +1429,34 @@ export function AdminHistoryPage() {
     setChatSearchErr(null);
 
     try {
+      if (isMobileLayout && firstPage) {
+        let cursor: string | null = null;
+        let guard = 0;
+        const allHits: Message[] = [];
+
+        do {
+          const data = await fetchMessagesPage({
+            conversationId: selectedConv.id,
+            take: 80,
+            cursor,
+            q,
+          });
+
+          const items = data.items ?? [];
+          allHits.push(...items.filter((m) => matchText(messageSearchableText(m), q, effectiveSearchMode)));
+          cursor = data.nextCursor ?? null;
+          guard += 1;
+        } while (cursor && guard < 80);
+
+        setChatSearchHits(allHits);
+        setChatSearchNextCursor(null);
+        setChatSearchActiveIndex(allHits.length ? 0 : -1);
+        if (allHits[0]) {
+          await jumpToChatHit(allHits[0]);
+        }
+        return;
+      }
+
       const data = await fetchMessagesPage({
         conversationId: selectedConv.id,
         take: 80,
@@ -802,15 +1465,22 @@ export function AdminHistoryPage() {
       });
 
       const items = data.items ?? [];
-      const filtered = items.filter((m) => matchText(m.body ?? "", q, chatSearchMode));
+      const filtered = items.filter((m) => matchText(messageSearchableText(m), q, effectiveSearchMode));
 
       setChatSearchHits((prev) => (firstPage ? filtered : [...prev, ...filtered]));
       setChatSearchNextCursor(data.nextCursor ?? null);
+      if (firstPage) {
+        setChatSearchActiveIndex(filtered.length ? 0 : -1);
+        if (isMobileLayout && filtered[0]) {
+          await jumpToChatHit(filtered[0]);
+        }
+      }
     } catch (e: any) {
       if (e?.response?.status === 401) return logout();
       setChatSearchErr(e?.response?.data?.message ?? "Falha ao buscar na conversa");
       setChatSearchHits([]);
       setChatSearchNextCursor(null);
+      setChatSearchActiveIndex(-1);
     } finally {
       setChatSearchLoading(false);
     }
@@ -826,6 +1496,7 @@ export function AdminHistoryPage() {
       setChatSearchErr(null);
       setChatSearchHits([]);
       setChatSearchNextCursor(null);
+      setChatSearchActiveIndex(-1);
       setChatSearchLoading(false);
       return;
     }
@@ -836,7 +1507,7 @@ export function AdminHistoryPage() {
 
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatSearchQ, chatSearchOpen, mode, selectedConv?.id, chatSearchMode]);
+  }, [chatSearchQ, chatSearchOpen, mode, selectedConv?.id, chatSearchMode, isMobileLayout]);
 
   async function jumpToChatHit(m: Message) {
     if (!selectedConv?.id) return;
@@ -845,6 +1516,68 @@ export function AdminHistoryPage() {
     setPendingScrollToId(m.id);
 
     await ensureMessageLoaded(selectedConv.id, m.id);
+  }
+
+  async function stepChatSearch(direction: -1 | 1) {
+    if (!chatSearchHits.length) return;
+
+    const total = chatSearchHits.length;
+    let nextIndex = chatSearchActiveIndex;
+    if (nextIndex < 0) {
+      nextIndex = direction > 0 ? 0 : total - 1;
+    } else {
+      nextIndex = (nextIndex + direction + total) % total;
+    }
+
+    setChatSearchActiveIndex(nextIndex);
+    await jumpToChatHit(chatSearchHits[nextIndex]);
+  }
+
+  function resetChatSearch(opts?: { clearHighlight?: boolean }) {
+    const clearHighlight = opts?.clearHighlight ?? true;
+    setChatSearchOpen(false);
+    setChatSearchQ("");
+    setChatSearchHits([]);
+    setChatSearchNextCursor(null);
+    setChatSearchErr(null);
+    setChatSearchActiveIndex(-1);
+    setChatSearchLoading(false);
+    if (clearHighlight) {
+      setHighlightTerm("");
+    }
+  }
+
+  function toggleChatSearch() {
+    if (chatSearchOpen) {
+      resetChatSearch();
+      return;
+    }
+    if (isMobileLayout) {
+      setChatSearchMode("normal");
+    }
+    setChatSearchOpen(true);
+  }
+
+  function backToUserConversations() {
+    setMode("userConversations");
+    setSelectedConv(null);
+    setMessages([]);
+    setNextCursor(null);
+    setHasMore(true);
+
+    resetChatSearch();
+    setPendingScrollToId(null);
+    setMediaItems([]);
+    setMediaMsg(null);
+    setMediaTab("image");
+    setMediaLibraryTab("image");
+    setMediaLibraryOpen(false);
+    setNewMsgsCount(0);
+    setShowJumpNew(false);
+    setRemovingAttachmentId(null);
+    setImageViewerOpen(false);
+    setImageViewerItems([]);
+    setImageViewerIndex(0);
   }
 
   // ====== UI ======
@@ -874,6 +1607,124 @@ export function AdminHistoryPage() {
     }
     return out;
   }, [messages]);
+
+  const imageMediaItems = useMemo(
+    () =>
+      [...mediaItems]
+        .filter((item) => isMediaAttachment(item) && !!item.attachmentUrl)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [mediaItems]
+  );
+
+  const fileMediaItems = useMemo(
+    () =>
+      [...mediaItems]
+        .filter((item) => !isMediaAttachment(item) && item.contentType === "FILE" && !!item.attachmentUrl)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [mediaItems]
+  );
+
+  const imagePreviewData = useMemo(() => {
+    const slotCount = Math.max(2, mediaPreviewSlots);
+    const hasMore = imageMediaItems.length > slotCount - 1;
+    const visibleCount = hasMore ? Math.max(slotCount - 1, 1) : Math.min(imageMediaItems.length, slotCount);
+    return {
+      hasMore,
+      items: imageMediaItems.slice(0, visibleCount),
+    };
+  }, [imageMediaItems, mediaPreviewSlots]);
+
+  const filePreviewData = useMemo(() => {
+    const slotCount = Math.max(2, mediaPreviewSlots);
+    const hasMore = fileMediaItems.length > slotCount - 1;
+    const visibleCount = hasMore ? Math.max(slotCount - 1, 1) : Math.min(fileMediaItems.length, slotCount);
+    return {
+      hasMore,
+      items: fileMediaItems.slice(0, visibleCount),
+    };
+  }, [fileMediaItems, mediaPreviewSlots]);
+  const mediaPreviewGridColumns = Math.max(2, mediaPreviewSlots);
+
+  const mediaLibraryItems = mediaLibraryTab === "image" ? imageMediaItems : fileMediaItems;
+
+  const hasRetentionChanges = useMemo(() => {
+    if (!retentionDraft || !retentionPolicy) return false;
+    return (
+      retentionDraft.enabled !== retentionPolicy.enabled ||
+      retentionDraft.showToUsers !== retentionPolicy.showToUsers ||
+      retentionDraft.intervalUnit !== retentionPolicy.intervalUnit ||
+      normalizeIntervalCountInput(retentionDraft.intervalCount) !== String(retentionPolicy.intervalCount ?? 1) ||
+      normalizeHourInput(retentionDraft.runHour) !== twoDigits(retentionPolicy.runHour) ||
+      normalizeMinuteInput(retentionDraft.runMinute) !== twoDigits(retentionPolicy.runMinute)
+    );
+  }, [retentionDraft, retentionPolicy]);
+
+  const retentionFrequencyText = retentionPolicy?.enabled
+    ? `${retentionPolicy.intervalLabel} às ${twoDigits(retentionPolicy.runHour)}:${twoDigits(retentionPolicy.runMinute)}`
+    : "Desativada";
+  const retentionNextRunText = retentionPolicy?.enabled
+    ? retentionPolicy.nextRunAt
+      ? fmt(retentionPolicy.nextRunAt)
+      : "a definir"
+    : "Desativada";
+  const retentionLastRunText = retentionPolicy?.lastRunAt ? fmt(retentionPolicy.lastRunAt) : "Nenhuma execução registrada";
+  const retentionLastCountsText = retentionPolicy
+    ? `${retentionPolicy.lastMediaCount ?? 0} mídia(s) • ${retentionPolicy.lastFileCount ?? 0} arquivo(s)`
+    : "0 mídia(s) • 0 arquivo(s)";
+  const retentionNextCountsText = retentionPolicy
+    ? `${retentionPolicy.nextMediaCount ?? 0} mídia(s) • ${retentionPolicy.nextFileCount ?? 0} arquivo(s)`
+    : "0 mídia(s) • 0 arquivo(s)";
+
+  const currentViewerItem = imageViewerItems[imageViewerIndex] ?? null;
+  const currentViewerUrl = toAbsoluteUrl(currentViewerItem?.attachmentUrl);
+  const currentViewerIsVideo = currentViewerItem ? isVideoAttachment(currentViewerItem) : false;
+  const canViewerPrev = imageViewerIndex > 0;
+  const canViewerNext = imageViewerIndex < imageViewerItems.length - 1;
+  const currentChatSearchPosition =
+    chatSearchHits.length > 0 && chatSearchActiveIndex >= 0 ? chatSearchActiveIndex + 1 : 0;
+
+  useEffect(() => {
+    if (!imageViewerOpen) return;
+    if (imageViewerItems.length === 0) {
+      closeImageViewer();
+      return;
+    }
+    if (imageViewerIndex >= imageViewerItems.length) {
+      setImageViewerIndex(Math.max(0, imageViewerItems.length - 1));
+    }
+  }, [imageViewerIndex, imageViewerItems.length, imageViewerOpen]);
+
+  useEffect(() => {
+    if (mode !== "conversation") return;
+    const host = mediaPreviewHostRef.current;
+    if (!host) return;
+
+    const recompute = () => {
+      const width = host.clientWidth || 0;
+      if (!width) return;
+      const minCardWidth = mediaTab === "image" ? 158 : 220;
+      const gap = 10;
+      const floor = Math.floor((width + gap) / (minCardWidth + gap));
+      const minSlots = isMobileLayout ? 2 : 3;
+      const slots = Math.min(8, Math.max(minSlots, floor));
+      setMediaPreviewSlots(slots);
+    };
+
+    recompute();
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(() => recompute());
+      ro.observe(host);
+    } else {
+      window.addEventListener("resize", recompute);
+    }
+
+    return () => {
+      if (ro) ro.disconnect();
+      else window.removeEventListener("resize", recompute);
+    };
+  }, [mode, mediaTab, isMobileLayout]);
 
   // “scroll pra msg” (garantia extra)
   useEffect(() => {
@@ -906,12 +1757,180 @@ export function AdminHistoryPage() {
   }, [mode, pendingScrollToId, messages]);
 
   return (
-    <div className="admin-page">
-      <h1 style={{ margin: 0, marginBottom: 6 }}>Históricos</h1>
-      <div className="admin-historySubtitle">{headerSubtitle}</div>
+    <div
+      ref={pageRef}
+      className={`admin-page ${mode === "conversation" ? "admin-page--conversation" : ""}`}
+      style={mode === "conversation" && conversationViewportHeight ? { height: conversationViewportHeight } : undefined}
+    >
+      {mode !== "conversation" ? (
+        <>
+          <h1 style={{ margin: 0, marginBottom: 6 }}>Históricos</h1>
+          <div className="admin-historySubtitle">{headerSubtitle}</div>
+        </>
+      ) : null}
 
       {mode === "contacts" ? (
         <div className="admin-grid12">
+          <div className="admin-historyRetentionWrap">
+            <div className="admin-historyRetentionCard">
+              {retentionLoading || !retentionDraft ? (
+                <div className="admin-historyInfoText">Carregando política...</div>
+              ) : (
+                <div className="admin-historyRetentionCard__grid">
+                  <div className="admin-historyRetentionCard__topRow">
+                    <div className="admin-historyRetentionCard__togglesCol">
+                      <div className="admin-historyRetentionCard__toggleItem">
+                        <ToggleSwitch
+                          checked={retentionDraft.enabled}
+                          onChange={(value) => updateRetentionDraft({ enabled: value })}
+                        />
+                        <div className="admin-historyRetentionCard__toggleText">
+                          <div className="admin-historyRetentionCard__toggleTitle">Ativar exclusão automática</div>
+                          <div className="admin-historyRetentionCard__toggleHint">
+                            Desative para pausar execuções automáticas.
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className={`admin-historyRetentionCard__toggleItem ${!retentionDraft.enabled ? "is-disabled" : ""}`}>
+                        <ToggleSwitch
+                          checked={retentionDraft.showToUsers}
+                          disabled={!retentionDraft.enabled}
+                          onChange={(value) => updateRetentionDraft({ showToUsers: value })}
+                        />
+                        <div className="admin-historyRetentionCard__toggleText">
+                          <div className="admin-historyRetentionCard__toggleTitle">Mostrar política para usuários no chat</div>
+                          <div className="admin-historyRetentionCard__toggleHint">
+                            Exibe a data da próxima exclusão para os usuários.
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className={`admin-historyRetentionCard__statusBox ${!retentionDraft.enabled ? "is-disabled" : ""}`}>
+                      <div className="admin-historyRetentionCard__statusLine">
+                        <span className="admin-historyRetentionCard__statusLabel">Próxima execução</span>
+                        <strong className="admin-historyRetentionCard__statusValue">{retentionNextRunText}</strong>
+                      </div>
+                      <div className="admin-historyRetentionCard__statusLine">
+                        <span className="admin-historyRetentionCard__statusLabel">Última execução</span>
+                        <strong className="admin-historyRetentionCard__statusValue">{retentionLastRunText}</strong>
+                      </div>
+                      <div className="admin-historyRetentionCard__statusLine">
+                        <span className="admin-historyRetentionCard__statusLabel">Próxima limpeza</span>
+                        <strong className="admin-historyRetentionCard__statusValue">{retentionNextCountsText}</strong>
+                      </div>
+                      <div className="admin-historyRetentionCard__statusLine">
+                        <span className="admin-historyRetentionCard__statusLabel">Última limpeza</span>
+                        <strong className="admin-historyRetentionCard__statusValue">{retentionLastCountsText}</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className={`admin-historyRetentionCard__settings ${!retentionDraft.enabled ? "is-disabled" : ""}`}>
+                    <div className="admin-historyRetentionCard__controlsRow">
+                      <div className="admin-historyRetentionCard__group admin-historyRetentionCard__group--interval">
+                        <span className="admin-historyRetentionCard__groupLabel">Periodicidade</span>
+                        <div className="admin-historyRetentionCard__intervalFields">
+                          <input
+                            aria-label="Periodicidade"
+                            value={retentionDraft.intervalCount}
+                            disabled={!retentionDraft.enabled}
+                            onChange={(e) => updateRetentionDraft({ intervalCount: intervalCountDigitsOnly(e.target.value) })}
+                            onBlur={normalizeRetentionDraftIntervalCount}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                            }}
+                            placeholder="1"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            maxLength={3}
+                            style={inputStyle({ width: 88, textAlign: "center", fontWeight: 900 })}
+                          />
+                          <select
+                            aria-label="Unidade da periodicidade"
+                            value={retentionDraft.intervalUnit}
+                            disabled={!retentionDraft.enabled}
+                            onChange={(e) => updateRetentionDraft({ intervalUnit: e.target.value as RetentionIntervalUnit })}
+                            style={inputStyle({ minWidth: 132 })}
+                          >
+                            <option value="DAY">Dia</option>
+                            <option value="MONTH">Mês</option>
+                            <option value="YEAR">Ano</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <label className="admin-historyRetentionCard__group admin-historyRetentionCard__group--time">
+                        <span className="admin-historyRetentionCard__groupLabel">Horário da execução (24h)</span>
+                        <div className="admin-historyRetentionCard__timeField">
+                          <input
+                            value={retentionDraft.runHour}
+                            disabled={!retentionDraft.enabled}
+                            onChange={(e) => updateRetentionDraft({ runHour: timeDigitsOnly(e.target.value) })}
+                            onBlur={() => normalizeRetentionDraftTime("runHour")}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                            }}
+                            placeholder="HH"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            maxLength={2}
+                            style={inputStyle({ width: 78, textAlign: "center", fontWeight: 900 })}
+                          />
+                          <span className="admin-historyRetentionCard__timeSep">:</span>
+                          <input
+                            value={retentionDraft.runMinute}
+                            disabled={!retentionDraft.enabled}
+                            onChange={(e) => updateRetentionDraft({ runMinute: timeDigitsOnly(e.target.value) })}
+                            onBlur={() => normalizeRetentionDraftTime("runMinute")}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                            }}
+                            placeholder="MM"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            maxLength={2}
+                            style={inputStyle({ width: 78, textAlign: "center", fontWeight: 900 })}
+                          />
+                        </div>
+                      </label>
+
+                      <div className="admin-historyRetentionCard__summaryBlock">
+                        <div className="admin-historyRetentionCard__summaryLine">
+                          <span className="admin-historyRetentionCard__summaryLabel">Frequência ativa:</span>
+                          <strong className="admin-historyRetentionCard__summaryValue">{retentionFrequencyText}</strong>
+                        </div>
+
+                        {retentionMsg ? (
+                          <div
+                            className={`admin-historyRetentionCard__summaryFeedback ${
+                              retentionMsg.includes("sucesso") ? "is-success" : "is-error"
+                            }`}
+                          >
+                            {retentionMsg}
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div className="admin-historyRetentionCard__saveWrap">
+                        <button
+                          type="button"
+                          onClick={() => void saveRetentionPolicy()}
+                          className={`admin-historySaveBtn ${hasRetentionChanges ? "is-active" : "is-idle"}`}
+                          disabled={retentionSaving || !hasRetentionChanges}
+                          title={hasRetentionChanges ? "Salvar alterações da política" : "Nenhuma alteração pendente"}
+                        >
+                          {retentionSaving ? "Salvando..." : "Salvar política"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
           <Card title="Busca Global" colSpan={12}>
             <div className="admin-historyControlsRow">
               <input
@@ -984,9 +2003,6 @@ export function AdminHistoryPage() {
             colSpan={12}
             right={
               <div className={`admin-historyCardRight ${isMobileLayout ? "admin-historyCardRight--mobile" : ""}`}>
-                <button onClick={loadContacts} style={ghostBtn(contactsLoading)}>
-                  {contactsLoading ? "Atualizando..." : "Atualizar"}
-                </button>
                 <div style={{ color: "var(--muted)" }}>
                   {contactsLoading ? "Carregando..." : `${filteredContacts.length} contato(s)`}
                 </div>
@@ -1081,6 +2097,7 @@ export function AdminHistoryPage() {
                   >
                     {(() => {
                       const avatar = contactAvatarUrl(u.avatarUrl);
+                      const showAvatar = !!avatar && !brokenAvatarIds.has(u.id);
                       const fallback = (u.name || u.username).slice(0, 1).toUpperCase();
                       const company = u.company?.name ?? "Sem empresa";
                       const department = u.department?.name ?? "Sem setor";
@@ -1105,7 +2122,7 @@ export function AdminHistoryPage() {
                                 </div>
                               </div>
                               <div className="admin-historyContactCard__avatar admin-historyContactCard__avatar--mobile">
-                                {avatar ? <img src={avatar} alt={u.name} /> : fallback}
+                                {showAvatar ? <img src={avatar ?? ""} alt={u.name} onError={() => markAvatarBroken(u.id)} /> : fallback}
                               </div>
                             </div>
                             <div className="admin-historyContactCard__mobileMeta">
@@ -1131,7 +2148,9 @@ export function AdminHistoryPage() {
 
                       return (
                         <>
-                          <div className="admin-historyContactCard__avatar">{avatar ? <img src={avatar} alt={u.name} /> : fallback}</div>
+                          <div className="admin-historyContactCard__avatar">
+                            {showAvatar ? <img src={avatar ?? ""} alt={u.name} onError={() => markAvatarBroken(u.id)} /> : fallback}
+                          </div>
                           <div className="admin-historyContactCard__identity">
                             <div className="admin-historyContactCard__name">{u.name}</div>
                             <div className="admin-historyContactCard__username">@{u.username}</div>
@@ -1174,14 +2193,6 @@ export function AdminHistoryPage() {
                 >
                   ← Voltar
                 </button>
-                <button
-                  onClick={() => {
-                    if (selectedUser) openUser(selectedUser);
-                  }}
-                  style={ghostBtn(userConvsLoading)}
-                >
-                  {userConvsLoading ? "Atualizando..." : "Atualizar"}
-                </button>
               </div>
             }
           >
@@ -1194,23 +2205,45 @@ export function AdminHistoryPage() {
                 <div className="admin-historyEmpty">Nenhuma conversa encontrada.</div>
               ) : (
                 userConvs.map((c) => (
-                  <button
-                    key={c.id}
-                    onClick={() => openConversation(c)}
-                    className="admin-historyConvCard"
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                      <div>
-                        <div style={{ fontWeight: 900 }}>{c.otherUser.name}</div>
-                        <div style={{ fontSize: 12, color: "var(--muted)" }}>@{c.otherUser.username}</div>
-                      </div>
-                      <div style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{fmt(c.updatedAt)}</div>
-                    </div>
+                  (() => {
+                    const avatar = contactAvatarUrl(c.otherUser.avatarUrl);
+                    const showAvatar = !!avatar && !brokenAvatarIds.has(c.otherUser.id);
+                    const fallback = (c.otherUser.name || c.otherUser.username).slice(0, 1).toUpperCase();
+                    const previewText = c.lastMessage?.bodyPreview || "Sem mensagens ainda";
+                    const previewDate = c.lastMessage?.createdAt ?? c.updatedAt;
 
-                    <div style={{ marginTop: 8, fontSize: 13, color: "var(--muted)" }}>
-                      {c.lastMessage ? c.lastMessage.bodyPreview : "Sem mensagens ainda"}
-                    </div>
-                  </button>
+                    return (
+                      <button
+                        key={c.id}
+                        onClick={() => openConversation(c)}
+                        className="admin-historyConvCard"
+                      >
+                        <div className="admin-historyConvCard__avatar">
+                          {showAvatar ? (
+                            <img
+                              src={avatar ?? ""}
+                              alt={c.otherUser.name}
+                              onError={() => markAvatarBroken(c.otherUser.id)}
+                            />
+                          ) : (
+                            fallback
+                          )}
+                        </div>
+
+                        <div className="admin-historyConvCard__main">
+                          <div className="admin-historyConvCard__top">
+                            <div className="admin-historyConvCard__identity">
+                              <div className="admin-historyConvCard__name">{c.otherUser.name}</div>
+                              <div className="admin-historyConvCard__username">@{c.otherUser.username}</div>
+                            </div>
+                            <div className="admin-historyConvCard__time">{fmt(previewDate)}</div>
+                          </div>
+
+                          <div className="admin-historyConvCard__preview">{previewText}</div>
+                        </div>
+                      </button>
+                    );
+                  })()
                 ))
               )}
             </div>
@@ -1218,62 +2251,97 @@ export function AdminHistoryPage() {
         </div>
       ) : (
         <div className="admin-grid12">
-          <Card
-            title={`${selectedUser?.name ?? "Usuário"} ↔ ${selectedConv?.otherUser?.name ?? "Contato"}`}
-            colSpan={12}
-            right={
-              <div className="admin-historyCardRight">
-                <button
-                  onClick={() => {
-                    setMode("userConversations");
-                    setSelectedConv(null);
-                    setMessages([]);
-                    setNextCursor(null);
-                    setHasMore(true);
-
-                    setChatSearchOpen(false);
-                    setChatSearchQ("");
-                    setChatSearchHits([]);
-                    setChatSearchNextCursor(null);
-                    setChatSearchErr(null);
-
-                    setHighlightTerm("");
-                    setPendingScrollToId(null);
-                  }}
-                  style={ghostBtn(false)}
-                >
-                  ← Voltar
-                </button>
-
-                <button
-                  onClick={() => {
-                    if (selectedConv?.id) loadFirstPage(selectedConv.id, { scrollToBottom: true });
-                  }}
-                  style={ghostBtn(chatLoading)}
-                  title="Recarregar"
-                >
-                  {chatLoading ? "Carregando..." : "Atualizar"}
-                </button>
-
-                <button
-                  onClick={() => setChatSearchOpen((v) => !v)}
-                  className="bhash-iconBtn"
-                  title="Pesquisar mensagens"
-                >
-                  <SearchIcon />
-                </button>
-              </div>
-            }
-          >
+          <Card title="" colSpan={12} className="admin-historyConversationCard">
             {chatMsg ? <div style={{ marginBottom: 10, color: "#ff8a8a", fontSize: 13 }}>{chatMsg}</div> : null}
+            {mediaMsg ? <div style={{ marginBottom: 10, color: "#ff8a8a", fontSize: 13 }}>{mediaMsg}</div> : null}
 
-            <div className={chatSearchOpen ? "bhash-chatGrid bhash-chatGrid--withSearch" : "bhash-chatGrid"}>
-              {/* Chat */}
+            <div className="admin-historyConvTools">
+              <button
+                onClick={toggleChatSearch}
+                className="bhash-iconBtn"
+                title={chatSearchOpen ? "Fechar busca" : "Abrir busca"}
+              >
+                <SearchIcon />
+              </button>
+              <div className="admin-historyConvTools__title">
+                {selectedUser?.name ?? "Usuário"} ↔ {selectedConv?.otherUser?.name ?? "Contato"}
+              </div>
+              <button onClick={backToUserConversations} style={ghostBtn(false)}>
+                ← Voltar
+              </button>
+            </div>
+
+            {isMobileLayout && chatSearchOpen ? (
+              <div className="admin-historyMobileFindBar">
+                <div className="admin-historyMobileFindBar__row">
+                  <input
+                    value={chatSearchQ}
+                    onChange={(e) => setChatSearchQ(e.target.value)}
+                    placeholder="Buscar no chat..."
+                    className="admin-historyMobileFindBar__input"
+                    autoFocus
+                  />
+                  <div className="admin-historyMobileFindBar__count">
+                    {chatSearchLoading ? "..." : `${currentChatSearchPosition}/${chatSearchHits.length}`}
+                  </div>
+                </div>
+
+                <div className="admin-historyMobileFindBar__actions">
+                  <button
+                    type="button"
+                    className="admin-historyMobileFindBar__btn"
+                    onClick={() => void stepChatSearch(-1)}
+                    disabled={chatSearchLoading || chatSearchHits.length === 0}
+                    title="Ocorrência anterior"
+                  >
+                    <ChevronUpIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className="admin-historyMobileFindBar__btn"
+                    onClick={() => void stepChatSearch(1)}
+                    disabled={chatSearchLoading || chatSearchHits.length === 0}
+                    title="Próxima ocorrência"
+                  >
+                    <ChevronDownIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className="admin-historyMobileFindBar__btn"
+                    onClick={() => resetChatSearch()}
+                    title="Fechar busca"
+                  >
+                    <CloseIcon />
+                  </button>
+                </div>
+
+                {chatSearchErr ? (
+                  <div className="admin-historyMobileFindBar__helper is-error">{chatSearchErr}</div>
+                ) : (
+                  <div className="admin-historyMobileFindBar__helper">
+                    {chatSearchLoading
+                      ? "Buscando ocorrências..."
+                      : chatSearchQ.trim()
+                      ? chatSearchHits.length
+                        ? "Use as setas para navegar pelas ocorrências."
+                        : "Nenhuma ocorrência encontrada."
+                      : "Digite uma palavra para localizar as ocorrências nesta conversa."}
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            <div className={`bhash-chatGrid ${chatSearchOpen && !isMobileLayout ? "bhash-chatGrid--withSearch" : ""}`}>
               <div
                 ref={listRef}
                 onScroll={() => {
                   const el = listRef.current;
                   if (!el) return;
+                  const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+                  if (distanceFromBottom < 140) {
+                    setShowJumpNew(false);
+                    setNewMsgsCount(0);
+                  }
                   if (el.scrollTop < 120 && selectedConv?.id) loadMoreTop(selectedConv.id);
                 }}
                 className="wa-chat"
@@ -1300,6 +2368,10 @@ export function AdminHistoryPage() {
 
                     const m = row.m;
                     const isMe = selectedUser?.id ? m.senderId === selectedUser.id : false;
+                    const mediaUrl = toAbsoluteUrl(m.attachmentUrl);
+                    const isRemovedImageAttachment = m.contentType === "IMAGE" && !mediaUrl && !!m.deletedAt;
+                    const isRemovedFileAttachment = m.contentType === "FILE" && !mediaUrl && !!m.deletedAt;
+                    const bodyWithoutRemovedNotice = stripAttachmentRemovalNotice(m.body);
 
                     const time = (() => {
                       try {
@@ -1330,13 +2402,102 @@ export function AdminHistoryPage() {
                             position: "relative",
                           }}
                         >
-                          <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.35, paddingRight: 54 }}>
-                            {highlightTerm.trim() ? (
-                              <HighlightText text={m.body ?? ""} query={highlightTerm.trim()} />
-                            ) : (
-                              m.body ?? ""
-                            )}
-                          </div>
+                          {!isMe ? (
+                            <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.85, marginBottom: 4 }}>
+                              {m.sender?.name ?? "Usuário"}
+                            </div>
+                          ) : null}
+
+                          {isMediaAttachment(m) && mediaUrl ? (
+                            <button
+                              type="button"
+                              className="admin-historyInlineImageBtn"
+                              onClick={() => openImageViewer(m)}
+                              title={isVideoAttachment(m) ? "Abrir mídia" : "Abrir imagem"}
+                            >
+                              {isVideoAttachment(m) ? (
+                                <div className="admin-historyVideoPreview">
+                                  <video
+                                    src={mediaUrl}
+                                    className="admin-historyInlineImage"
+                                    preload="metadata"
+                                    muted
+                                    playsInline
+                                  />
+                                  <span className="admin-historyVideoPreview__badge">Vídeo</span>
+                                </div>
+                              ) : (
+                                <img
+                                  src={mediaUrl}
+                                  alt={normalizeAttachmentDisplayName(m.attachmentName) || "imagem"}
+                                  className="admin-historyInlineImage"
+                                />
+                              )}
+                            </button>
+                          ) : null}
+
+                          {!isMediaAttachment(m) && m.contentType === "FILE" && mediaUrl ? (
+                            <a
+                              href={mediaUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className={`admin-historyInlineFileCard ${isPdfAttachment(m) ? "admin-historyInlineFileCard--pdf" : ""}`}
+                            >
+                              {isPdfAttachment(m) ? (
+                                <div className="admin-historyInlineFileCard__preview" aria-hidden="true">
+                                  <iframe
+                                    src={buildPdfPreviewUrl(m.attachmentUrl) ?? ""}
+                                    title={normalizeAttachmentDisplayName(m.attachmentName) || "Pré-visualização do PDF"}
+                                    loading="lazy"
+                                    tabIndex={-1}
+                                  />
+                                </div>
+                              ) : null}
+                              <div className="admin-historyInlineFileCard__body">
+                                <div className="admin-historyInlineFileCard__name">
+                                  {normalizeAttachmentDisplayName(m.attachmentName) || "Arquivo"}
+                                </div>
+                                <div className="admin-historyInlineFileCard__meta">
+                                  {m.attachmentMime ?? "Arquivo"}
+                                  {m.attachmentSize ? ` • ${formatBytes(m.attachmentSize)}` : ""}
+                                </div>
+                              </div>
+                            </a>
+                          ) : null}
+
+                          {isRemovedImageAttachment ? (
+                            <div className="admin-historyRemovedAttachment admin-historyRemovedAttachment--image">
+                              <div className="admin-historyRemovedAttachment__icon" aria-hidden="true">
+                                <ImageIcon />
+                              </div>
+                              <div className="admin-historyRemovedAttachment__title">Essa imagem foi apagada</div>
+                              <div className="admin-historyRemovedAttachment__text">
+                                Pelo administrador segundo a política de backup de arquivos.
+                              </div>
+                            </div>
+                          ) : null}
+
+                          {isRemovedFileAttachment ? (
+                            <div className="admin-historyRemovedAttachment admin-historyRemovedAttachment--file">
+                              <div className="admin-historyRemovedAttachment__icon" aria-hidden="true">
+                                <FileIcon />
+                              </div>
+                              <div className="admin-historyRemovedAttachment__title">Esse documento foi apagado</div>
+                              <div className="admin-historyRemovedAttachment__text">
+                                Pelo administrador segundo a política de backup de arquivos.
+                              </div>
+                            </div>
+                          ) : null}
+
+                          {bodyWithoutRemovedNotice ? (
+                            <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.35, paddingRight: 54 }}>
+                              {highlightTerm.trim() ? (
+                                <HighlightText text={bodyWithoutRemovedNotice} query={highlightTerm.trim()} />
+                              ) : (
+                                bodyWithoutRemovedNotice
+                              )}
+                            </div>
+                          ) : null}
 
                           <div className="bhash-time">{time}</div>
                         </div>
@@ -1350,58 +2511,42 @@ export function AdminHistoryPage() {
                 </div>
               </div>
 
-              {/* Painel lateral de busca */}
-              {chatSearchOpen ? (
-                <div className="bhash-searchPanel">
-                  <div
-                    style={{
-                      padding: 12,
-                      borderBottom: "1px solid var(--border)",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 10,
-                    }}
-                  >
-                    <div style={{ fontWeight: 900, color: "var(--fg)" }}>Modo de Pesquisa:</div>
-
-                    <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
+              {chatSearchOpen && !isMobileLayout ? (
+                <aside className="bhash-searchPanel">
+                  <div className="admin-historySearchPanel__head">
+                    <div className="admin-historySearchPanel__title">Modo de Pesquisa</div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                       <ModeToggle value={chatSearchMode} onChange={setChatSearchMode} small />
-                      <button
-                        onClick={() => setChatSearchOpen(false)}
-                        className="bhash-iconBtn"
-                        title="Fechar"
-                      >
+                      <button onClick={() => resetChatSearch()} className="bhash-iconBtn" title="Fechar busca">
                         ×
                       </button>
                     </div>
                   </div>
 
-                  <div style={{ padding: 12, display: "grid", gap: 10 }}>
-                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                      <input
-                        value={chatSearchQ}
-                        onChange={(e) => setChatSearchQ(e.target.value)}
-                        placeholder="Buscar…"
-                        style={inputStyle({ flex: 1 })}
-                      />
-                    </div>
-
-                    {chatSearchErr ? <div style={{ color: "#ff8a8a", fontSize: 13 }}>{chatSearchErr}</div> : null}
-
-                    <div style={{ color: "var(--muted)", fontSize: 12 }}>
-                      {chatSearchQ.trim()
-                        ? `${chatSearchHits.length} resultado(s)`
-                        : "Digite um termo para ver as ocorrências nesta conversa."}
-                    </div>
+                  <div className="admin-historySearchPanel__input">
+                    <input
+                      value={chatSearchQ}
+                      onChange={(e) => setChatSearchQ(e.target.value)}
+                      placeholder="Buscar..."
+                      style={inputStyle({ width: "100%" })}
+                    />
                   </div>
 
                   <div className="bhash-searchPanel__list">
                     <div className="bhash-searchPanel__listInner">
+                      {chatSearchErr ? <div style={{ color: "#ff8a8a", fontSize: 13 }}>{chatSearchErr}</div> : null}
+
+                      <div style={{ color: "var(--muted)", fontSize: 12 }}>
+                        {chatSearchQ.trim()
+                          ? `${chatSearchHits.length} resultado(s)`
+                          : "Digite um termo para ver as ocorrências nesta conversa."}
+                      </div>
+
                       {chatSearchQ.trim() && chatSearchHits.length === 0 && !chatSearchLoading ? (
                         <div style={{ color: "var(--muted)" }}>Nenhuma ocorrência.</div>
                       ) : null}
 
-                      {chatSearchHits.map((m) => {
+                      {chatSearchHits.map((m, index) => {
                         const time = (() => {
                           try {
                             const dt = new Date(m.createdAt);
@@ -1414,7 +2559,10 @@ export function AdminHistoryPage() {
                         return (
                           <button
                             key={m.id}
-                            onClick={() => jumpToChatHit(m)}
+                            onClick={() => {
+                              setChatSearchActiveIndex(index);
+                              void jumpToChatHit(m);
+                            }}
                             style={{
                               textAlign: "left",
                               padding: 12,
@@ -1440,7 +2588,7 @@ export function AdminHistoryPage() {
                             </div>
 
                             <div style={{ marginTop: 6, fontSize: 14, lineHeight: 1.35, whiteSpace: "pre-wrap" }}>
-                              <HighlightText text={m.body ?? ""} query={chatSearchQ.trim()} />
+                              <HighlightText text={messagePreviewText(m)} query={chatSearchQ.trim()} />
                             </div>
                           </button>
                         );
@@ -1466,17 +2614,546 @@ export function AdminHistoryPage() {
                       ) : null}
                     </div>
                   </div>
-                </div>
+                </aside>
               ) : null}
             </div>
 
-            <div className="admin-historyInfoText">
-              Tempo real: {token ? "ativo" : "—"} (mensagens novas aparecem automaticamente quando a conversa está aberta)
+            {showJumpNew ? (
+              <button
+                className="admin-historyJumpNewBtn"
+                onClick={() => {
+                  const el = listRef.current;
+                  if (el) el.scrollTop = el.scrollHeight;
+                  setShowJumpNew(false);
+                  setNewMsgsCount(0);
+                }}
+                title="Ir para novas mensagens"
+              >
+                <span>Novas mensagens</span>
+                <span className="admin-historyJumpNewBtn__count">{newMsgsCount > 99 ? "99+" : newMsgsCount}</span>
+              </button>
+            ) : null}
+
+            <div ref={mediaPreviewHostRef} className="admin-historyMediaCard admin-historyMediaCard--bottom">
+              <div className="bhash-modeToggle">
+                <button
+                  type="button"
+                  className={`bhash-modeToggle__btn ${mediaTab === "image" ? "is-active" : ""}`}
+                  onClick={() => setMediaTab("image")}
+                >
+                  Mídias ({imageMediaItems.length})
+                </button>
+                <button
+                  type="button"
+                  className={`bhash-modeToggle__btn ${mediaTab === "file" ? "is-active" : ""}`}
+                  onClick={() => setMediaTab("file")}
+                >
+                  Documentos ({fileMediaItems.length})
+                </button>
+              </div>
+
+              {mediaTab === "image" ? (
+                <div
+                  className="admin-historyMediaPreviewRow"
+                  style={{ gridTemplateColumns: `repeat(${mediaPreviewGridColumns}, minmax(0, 1fr))` }}
+                >
+                  {imagePreviewData.items.length === 0 ? (
+                    <div className="admin-historyEmpty">Nenhuma mídia ativa.</div>
+                  ) : (
+                    imagePreviewData.items.map((item) => {
+                      const imageUrl = toAbsoluteUrl(item.attachmentUrl);
+                      return (
+                        <div key={item.id} className="admin-historyMediaPreviewCard">
+                          <button
+                            className="admin-historyMediaPreviewThumb"
+                            onClick={() => openImageViewer(item)}
+                            title={isVideoAttachment(item) ? "Abrir mídia" : "Abrir imagem"}
+                          >
+                            {isVideoAttachment(item) ? (
+                              <div className="admin-historyVideoPreview">
+                                <video
+                                  src={imageUrl ?? ""}
+                                  className="admin-historyMediaThumbVideo"
+                                  preload="metadata"
+                                  muted
+                                  playsInline
+                                />
+                                <span className="admin-historyVideoPreview__badge">Vídeo</span>
+                              </div>
+                            ) : (
+                              <img src={imageUrl ?? ""} alt={normalizeAttachmentDisplayName(item.attachmentName) || "imagem"} />
+                            )}
+                          </button>
+                          <div className="admin-historyMediaPreviewActions">
+                            <button
+                              type="button"
+                              className="admin-historyMediaPreviewActionBtn"
+                              onClick={() => void jumpToMessage(item.id)}
+                            >
+                              Ver na conversa
+                            </button>
+                            <button
+                              type="button"
+                              className="admin-historyMediaPreviewActionBtn admin-historyMediaPreviewActionBtn--icon"
+                              onClick={() => void downloadAttachment(item)}
+                              title={isVideoAttachment(item) ? "Baixar vídeo" : "Baixar mídia"}
+                            >
+                              <DownloadIcon />
+                            </button>
+                            <button
+                              type="button"
+                              className="admin-historyMediaPreviewActionBtn admin-historyMediaPreviewActionBtn--icon is-danger"
+                              onClick={() => void removeAttachment(item)}
+                              disabled={removingAttachmentId === item.id}
+                              title={removingAttachmentId === item.id ? "Excluindo..." : "Excluir imagem"}
+                            >
+                              <TrashIcon />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+
+                  {imagePreviewData.hasMore ? (
+                    <button
+                      type="button"
+                      className="admin-historyMediaMoreBtn"
+                      onClick={() => {
+                        setMediaLibraryTab("image");
+                        setMediaLibraryOpen(true);
+                      }}
+                    >
+                      Ver mais +
+                    </button>
+                  ) : null}
+                </div>
+              ) : (
+                <div
+                  className="admin-historyMediaPreviewRow admin-historyMediaPreviewRow--files"
+                  style={{ gridTemplateColumns: `repeat(${mediaPreviewGridColumns}, minmax(0, 1fr))` }}
+                >
+                  {filePreviewData.items.length === 0 ? (
+                    <div className="admin-historyEmpty">Nenhum documento ativo.</div>
+                  ) : (
+                    filePreviewData.items.map((item) => {
+                      const fileUrl = toAbsoluteUrl(item.attachmentUrl);
+                      return (
+                        <div key={item.id} className="admin-historyMediaPreviewCard admin-historyMediaPreviewCard--file">
+                          <a
+                            href={fileUrl ?? "#"}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="admin-historyMediaMiniFile"
+                            onClick={(e) => {
+                              if (!fileUrl) e.preventDefault();
+                            }}
+                            title={normalizeAttachmentDisplayName(item.attachmentName) || "Arquivo"}
+                          >
+                            <div className="admin-historyMediaMiniFile__name">
+                              {normalizeAttachmentDisplayName(item.attachmentName) || "Arquivo"}
+                            </div>
+                            <div className="admin-historyMediaMiniFile__meta">
+                              {item.attachmentMime ?? "Arquivo"}
+                              {item.attachmentSize ? ` • ${formatBytes(item.attachmentSize)}` : ""}
+                            </div>
+                          </a>
+                          <div className="admin-historyMediaPreviewActions">
+                            <button
+                              type="button"
+                              className="admin-historyMediaPreviewActionBtn"
+                              onClick={() => void jumpToMessage(item.id)}
+                            >
+                              Ver na conversa
+                            </button>
+                            <button
+                              type="button"
+                              className="admin-historyMediaPreviewActionBtn admin-historyMediaPreviewActionBtn--icon"
+                              onClick={() => void downloadAttachment(item)}
+                              title="Baixar documento"
+                            >
+                              <DownloadIcon />
+                            </button>
+                            <button
+                              type="button"
+                              className="admin-historyMediaPreviewActionBtn admin-historyMediaPreviewActionBtn--icon is-danger"
+                              onClick={() => void removeAttachment(item)}
+                              disabled={removingAttachmentId === item.id}
+                              title={removingAttachmentId === item.id ? "Excluindo..." : "Excluir documento"}
+                            >
+                              <TrashIcon />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+
+                  {filePreviewData.hasMore ? (
+                    <button
+                      type="button"
+                      className="admin-historyMediaMoreBtn"
+                      onClick={() => {
+                        setMediaLibraryTab("file");
+                        setMediaLibraryOpen(true);
+                      }}
+                    >
+                      Ver mais +
+                    </button>
+                  ) : null}
+                </div>
+              )}
             </div>
           </Card>
         </div>
       )}
+
+      {mediaLibraryOpen ? (
+        <div className="admin-historyMediaLibrary" onClick={() => setMediaLibraryOpen(false)}>
+          <div className="admin-historyMediaLibrary__panel" onClick={(e) => e.stopPropagation()}>
+            <div className="admin-historyMediaLibrary__top">
+              <div className="admin-historyMediaLibrary__title">Anexos da conversa</div>
+              <button onClick={() => setMediaLibraryOpen(false)} className="bhash-iconBtn" title="Fechar">
+                ×
+              </button>
+            </div>
+
+            <div className="bhash-modeToggle">
+              <button
+                type="button"
+                className={`bhash-modeToggle__btn ${mediaLibraryTab === "image" ? "is-active" : ""}`}
+                onClick={() => setMediaLibraryTab("image")}
+              >
+                Mídias ({imageMediaItems.length})
+              </button>
+              <button
+                type="button"
+                className={`bhash-modeToggle__btn ${mediaLibraryTab === "file" ? "is-active" : ""}`}
+                onClick={() => setMediaLibraryTab("file")}
+              >
+                Documentos ({fileMediaItems.length})
+              </button>
+            </div>
+
+            {mediaLibraryTab === "image" ? (
+              <div className="admin-historyMediaStrip">
+                {mediaLibraryItems.length === 0 ? (
+                  <div className="admin-historyEmpty">Nenhuma mídia ativa.</div>
+                ) : (
+                  mediaLibraryItems.map((item) => {
+                    const imageUrl = toAbsoluteUrl(item.attachmentUrl);
+                    return (
+                      <div key={item.id} className="admin-historyMediaThumbCard">
+                        <button
+                          className="admin-historyMediaThumb"
+                          onClick={() => openImageViewer(item)}
+                          title="Abrir visualizador"
+                        >
+                          {isVideoAttachment(item) ? (
+                            <div className="admin-historyVideoPreview">
+                              <video
+                                src={imageUrl ?? ""}
+                                className="admin-historyMediaThumbVideo"
+                                preload="metadata"
+                                muted
+                                playsInline
+                              />
+                              <span className="admin-historyVideoPreview__badge">Vídeo</span>
+                            </div>
+                          ) : (
+                            <img src={imageUrl ?? ""} alt={normalizeAttachmentDisplayName(item.attachmentName) || "imagem"} />
+                          )}
+                        </button>
+                        <div className="admin-historyMediaThumbCard__meta">{fmt(item.createdAt)}</div>
+                        <div className="admin-historyMediaThumbCard__actions">
+                          <button
+                            type="button"
+                            className="admin-historyMediaLibraryActionBtn"
+                            onClick={() => void jumpToMessage(item.id)}
+                          >
+                            Ver na conversa
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void downloadAttachment(item)}
+                            className="admin-historyMediaLibraryActionBtn admin-historyMediaLibraryActionBtn--icon"
+                            title={isVideoAttachment(item) ? "Baixar vídeo" : "Baixar mídia"}
+                          >
+                            <DownloadIcon />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void removeAttachment(item)}
+                            className="admin-historyMediaLibraryActionBtn admin-historyMediaLibraryActionBtn--icon is-danger"
+                            disabled={removingAttachmentId === item.id}
+                            title={removingAttachmentId === item.id ? "Excluindo..." : "Excluir imagem"}
+                          >
+                            <TrashIcon />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            ) : (
+              <div className="admin-historyMediaFiles">
+                {mediaLibraryItems.length === 0 ? (
+                  <div className="admin-historyEmpty">Nenhum documento ativo.</div>
+                ) : (
+                  mediaLibraryItems.map((item) => {
+                    return (
+                      <div key={item.id} className="admin-historyMediaFileRow">
+                        <button
+                          type="button"
+                          className="admin-historyMediaFileRow__body"
+                          onClick={() => void jumpToMessage(item.id)}
+                          title="Ir para o documento na conversa"
+                          >
+                            {isPdfAttachment(item) ? (
+                              <div className="admin-historyInlineFileCard__preview admin-historyInlineFileCard__preview--library" aria-hidden="true">
+                                <iframe
+                                  src={buildPdfPreviewUrl(item.attachmentUrl) ?? ""}
+                                  title={normalizeAttachmentDisplayName(item.attachmentName) || "Pré-visualização do PDF"}
+                                  loading="lazy"
+                                  tabIndex={-1}
+                                />
+                              </div>
+                            ) : null}
+                            <div style={{ fontWeight: 800 }}>{normalizeAttachmentDisplayName(item.attachmentName) || "Arquivo"}</div>
+                            <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                              {item.attachmentMime ?? "Arquivo"}
+                            {item.attachmentSize ? ` • ${formatBytes(item.attachmentSize)}` : ""}
+                            {` • ${fmt(item.createdAt)}`}
+                          </div>
+                        </button>
+                        <div className="admin-historyMediaFileRow__actions">
+                          <button
+                            type="button"
+                            className="admin-historyMediaLibraryActionBtn"
+                            onClick={() => void jumpToMessage(item.id)}
+                          >
+                            Ver na conversa
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void downloadAttachment(item)}
+                            className="admin-historyMediaLibraryActionBtn admin-historyMediaLibraryActionBtn--icon"
+                            title="Baixar documento"
+                          >
+                            <DownloadIcon />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void removeAttachment(item)}
+                            className="admin-historyMediaLibraryActionBtn admin-historyMediaLibraryActionBtn--icon is-danger"
+                            disabled={removingAttachmentId === item.id}
+                            title={removingAttachmentId === item.id ? "Excluindo..." : "Excluir documento"}
+                          >
+                            <TrashIcon />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {imageViewerOpen ? (
+        <div className="admin-historyImageViewer" onClick={closeImageViewer}>
+          <div className="admin-historyImageViewer__panel" onClick={(e) => e.stopPropagation()}>
+            <div className="admin-historyImageViewer__top">
+              <div className="admin-historyImageViewer__metaBlock">
+                <div className="admin-historyImageViewer__title">
+                  {normalizeAttachmentDisplayName(currentViewerItem?.attachmentName) || (currentViewerIsVideo ? "Vídeo" : "Imagem")}
+                </div>
+                <div className="admin-historyImageViewer__meta">
+                  {imageViewerItems.length ? `${imageViewerIndex + 1} de ${imageViewerItems.length}` : "Sem mídias"}
+                  {currentViewerItem?.createdAt ? ` • ${fmt(currentViewerItem.createdAt)}` : ""}
+                </div>
+              </div>
+              <div className="admin-historyImageViewer__actions">
+                {currentViewerItem ? (
+                  <button onClick={() => void jumpToMessage(currentViewerItem.id)} className="admin-historyImageViewer__actionBtn">
+                    Ver na conversa
+                  </button>
+                ) : null}
+                {currentViewerItem?.attachmentUrl ? (
+                  <button
+                    onClick={() => void downloadAttachment(currentViewerItem)}
+                    className="admin-historyImageViewer__iconBtn"
+                    title={currentViewerIsVideo ? "Baixar vídeo" : "Baixar mídia"}
+                  >
+                    <DownloadIcon />
+                  </button>
+                ) : null}
+                {currentViewerItem ? (
+                  <button
+                    onClick={() => void removeAttachment(currentViewerItem)}
+                    className="admin-historyImageViewer__actionBtn admin-historyImageViewer__actionBtn--danger"
+                    disabled={removingAttachmentId === currentViewerItem.id}
+                    title={removingAttachmentId === currentViewerItem.id ? "Excluindo..." : "Excluir imagem"}
+                  >
+                    <TrashIcon />
+                  </button>
+                ) : null}
+                {!currentViewerIsVideo ? (
+                  <>
+                    <button
+                      type="button"
+                      className="admin-historyImageViewer__iconBtn"
+                      onClick={() => setViewerZoom(imageViewerZoom - 0.2)}
+                      title="Diminuir zoom"
+                      disabled={imageViewerZoom <= 1}
+                    >
+                      <ZoomOutIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className="admin-historyImageViewer__iconBtn"
+                      onClick={() => setViewerZoom(imageViewerZoom + 0.2)}
+                      title="Aumentar zoom"
+                    >
+                      <ZoomInIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className="admin-historyImageViewer__iconBtn"
+                      onClick={resetImageViewerTransform}
+                      title="Resetar zoom"
+                    >
+                      <ResetZoomIcon />
+                    </button>
+                    <span className="admin-historyImageViewer__zoomLabel">{Math.round(imageViewerZoom * 100)}%</span>
+                  </>
+                ) : null}
+                <button onClick={closeImageViewer} className="admin-historyImageViewer__iconBtn" title="Fechar">
+                  <CloseIcon />
+                </button>
+              </div>
+            </div>
+
+            <div className="admin-historyImageViewer__stage">
+              <button
+                className="admin-historyImageViewer__nav"
+                onClick={() => goImage(-1)}
+                disabled={!canViewerPrev}
+                title="Mídia anterior"
+              >
+                <ChevronLeftIcon />
+              </button>
+
+              <div
+                className={`admin-historyImageViewer__imageWrap ${imageViewerZoom > 1 ? "is-zoomed" : ""} ${
+                  imageViewerDragging ? "is-dragging" : ""
+                }`}
+                onWheel={(e) => {
+                  if (!currentViewerUrl || currentViewerIsVideo) return;
+                  e.preventDefault();
+                  const delta = e.deltaY < 0 ? 0.2 : -0.2;
+                  setViewerZoom(imageViewerZoom + delta);
+                }}
+                onMouseDown={(e) => {
+                  if (imageViewerZoom <= 1 || currentViewerIsVideo) return;
+                  e.preventDefault();
+                  imageViewerDragRef.current = {
+                    active: true,
+                    startX: e.clientX,
+                    startY: e.clientY,
+                    originX: imageViewerOffset.x,
+                    originY: imageViewerOffset.y,
+                  };
+                  setImageViewerDragging(true);
+                }}
+                onMouseMove={(e) => {
+                  const drag = imageViewerDragRef.current;
+                  if (!drag?.active) return;
+                  setImageViewerOffset({
+                    x: drag.originX + (e.clientX - drag.startX),
+                    y: drag.originY + (e.clientY - drag.startY),
+                  });
+                }}
+                onMouseUp={() => {
+                  if (imageViewerDragRef.current) imageViewerDragRef.current.active = false;
+                  setImageViewerDragging(false);
+                }}
+                onMouseLeave={() => {
+                  if (imageViewerDragRef.current) imageViewerDragRef.current.active = false;
+                  setImageViewerDragging(false);
+                }}
+                onDoubleClick={() => {
+                  if (currentViewerIsVideo) return;
+                  if (imageViewerZoom > 1) resetImageViewerTransform();
+                  else setViewerZoom(2);
+                }}
+              >
+                {currentViewerUrl ? (
+                  currentViewerIsVideo ? (
+                    <video
+                      key={currentViewerItem?.id ?? currentViewerUrl}
+                      src={currentViewerUrl}
+                      className="admin-historyImageViewer__video"
+                      controls
+                      playsInline
+                      preload="metadata"
+                    />
+                  ) : (
+                    <img
+                      key={currentViewerItem?.id ?? currentViewerUrl}
+                      src={currentViewerUrl}
+                      alt={normalizeAttachmentDisplayName(currentViewerItem?.attachmentName) || "imagem"}
+                      className="admin-historyImageViewer__image"
+                      draggable={false}
+                      style={{
+                        transform: `translate(${imageViewerOffset.x}px, ${imageViewerOffset.y}px) scale(${imageViewerZoom})`,
+                      }}
+                    />
+                  )
+                ) : (
+                  <div className="admin-historyEmpty">{currentViewerIsVideo ? "Vídeo indisponível." : "Imagem indisponível."}</div>
+                )}
+              </div>
+
+              <button
+                className="admin-historyImageViewer__nav"
+                onClick={() => goImage(1)}
+                disabled={!canViewerNext}
+                title="Próxima mídia"
+              >
+                <ChevronRightIcon />
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
+  );
+}
+
+function ToggleSwitch({
+  checked,
+  onChange,
+  disabled,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      className={`admin-historySwitch ${checked ? "is-on" : ""} ${disabled ? "is-disabled" : ""}`}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+    >
+      <span className="admin-historySwitch__thumb" />
+    </button>
   );
 }
 
@@ -1485,16 +3162,19 @@ function Card({
   title,
   colSpan,
   right,
+  className,
   children,
 }: {
   title: string;
   colSpan: number;
   right?: React.ReactNode;
+  className?: string;
   children: any;
 }) {
+  const hasHeader = !!title || !!right;
   return (
     <div
-      className="admin-card"
+      className={`admin-card ${className ?? ""}`}
       style={{
         gridColumn: `span ${colSpan}`,
         padding: 16,
@@ -1504,22 +3184,131 @@ function Card({
         boxShadow: "var(--shadow)",
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          gap: 12,
-          rowGap: 8,
-          flexWrap: "wrap",
-          alignItems: "center",
-          marginBottom: 10,
-        }}
-      >
-        <div style={{ fontWeight: 900 }}>{title}</div>
-        {right ? <div>{right}</div> : null}
-      </div>
+      {hasHeader ? (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 12,
+            rowGap: 8,
+            flexWrap: "wrap",
+            alignItems: "center",
+            marginBottom: 10,
+          }}
+        >
+          {title ? <div style={{ fontWeight: 900 }}>{title}</div> : <div />}
+          {right ? <div>{right}</div> : null}
+        </div>
+      ) : null}
       {children}
     </div>
+  );
+}
+
+function ImageIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="2" />
+      <circle cx="9" cy="10" r="1.5" fill="currentColor" />
+      <path d="M21 16l-5-5-6 6-2-2-5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function FileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="M8 3h6l5 5v13H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" stroke="currentColor" strokeWidth="2" />
+      <path d="M14 3v6h6" stroke="currentColor" strokeWidth="2" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+      <path d="M4 7h16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M10 11v6M14 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M9 4h6a1 1 0 0 1 1 1v2H8V5a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+      <path d="M12 4v10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="m8 11 4 4 4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 19h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ZoomInIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+      <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="2" />
+      <path d="M11 8v6M8 11h6M16.2 16.2l3.3 3.3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ZoomOutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+      <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="2" />
+      <path d="M8 11h6M16.2 16.2l3.3 3.3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ResetZoomIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+      <path d="M5 12a7 7 0 1 0 2-4.9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M5 5v4h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+      <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ChevronLeftIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="m15 6-6 6 6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ChevronRightIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="m9 6 6 6-6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ChevronUpIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="m6 15 6-6 6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 

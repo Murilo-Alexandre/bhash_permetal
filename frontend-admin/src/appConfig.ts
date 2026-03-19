@@ -2,6 +2,7 @@ import { API_BASE } from "./api";
 
 export type AppConfigDto = {
   primaryColor: string;
+  primaryTextColor?: string;
   logoUrl?: string | null;
 };
 

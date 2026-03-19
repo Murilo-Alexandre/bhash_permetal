@@ -19,9 +19,10 @@ import { promises as fs } from 'fs';
 import { AdminJwtAuthGuard } from '../admin-auth/admin-jwt-auth.guard';
 import { AppConfigService } from './app-config.service';
 import { UpdateAppConfigDto } from './dto/update-app-config.dto';
+import { normalizeUploadedFileName } from '../common/upload-filename.util';
 
 function safeExt(original: string) {
-  const ext = path.extname(original || '').toLowerCase();
+  const ext = path.extname(normalizeUploadedFileName(original) || '').toLowerCase();
   if (ext === '.png' || ext === '.jpg' || ext === '.jpeg' || ext === '.webp') return ext;
   return '.png';
 }
@@ -62,6 +63,7 @@ export class AdminAppConfigController {
   update(@Body() body: UpdateAppConfigDto) {
     return this.appConfig.updateConfig({
       primaryColor: body.primaryColor,
+      primaryTextColor: body.primaryTextColor,
       logoUrl: body.logoUrl,
     });
   }

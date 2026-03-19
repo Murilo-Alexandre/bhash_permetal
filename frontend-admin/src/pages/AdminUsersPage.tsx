@@ -541,7 +541,7 @@ function Th(props: any) {
       {...props}
       style={{
         padding: "10px 8px",
-        color: "#fff",
+        color: "var(--fg)",
         fontWeight: 900,
         borderBottom: "1px solid var(--border)",
         ...props.style,
@@ -565,29 +565,8 @@ function Td(props: any) {
 
 function StatusPill({ active }: { active: boolean }) {
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 8,
-        padding: "6px 10px",
-        borderRadius: 999,
-        fontWeight: 900,
-        fontSize: 12,
-        border: "1px solid var(--border)",
-        background: active ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.12)",
-        color: active ? "#d1fae5" : "#fee2e2",
-      }}
-    >
-      <span
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: 999,
-          background: active ? "#22c55e" : "#ef4444",
-          boxShadow: active ? "0 0 0 6px rgba(34,197,94,0.12)" : "0 0 0 6px rgba(239,68,68,0.12)",
-        }}
-      />
+    <span className={`admin-statusPill ${active ? "is-active" : "is-inactive"}`}>
+      <span className="admin-statusPill__dot" />
       {active ? "Ativo" : "Inativo"}
     </span>
   );
@@ -616,7 +595,7 @@ function IconButton({
     <button
       title={title}
       onClick={onClick}
-      className={`admin-actionBtn ${tone === "danger" ? "is-danger" : ""} ${
+      className={`admin-actionBtn ${tone === "neutral" ? "is-neutral" : ""} ${tone === "danger" ? "is-danger" : ""} ${
         tone === "warning" ? "is-warning" : ""
       } ${tone === "success" ? "is-success" : ""}`}
     >
@@ -876,7 +855,14 @@ function UserModal({
             <Field colSpan={12} label="Status">
               <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                 <ToggleSwitch checked={isActive} onChange={setIsActive} />
-                <div style={{ fontWeight: 900, color: isActive ? "#d1fae5" : "#fee2e2" }}>
+                <div
+                  style={{
+                    fontWeight: 900,
+                    color: isActive
+                      ? "color-mix(in srgb, #22c55e 78%, var(--fg))"
+                      : "color-mix(in srgb, #ef4444 78%, var(--fg))",
+                  }}
+                >
                   {isActive ? "Usuário ativo" : "Usuário inativo"}
                 </div>
 
@@ -1081,21 +1067,13 @@ function IconPencil() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <path
-        d="M3 20.5 4.55 15l9.9-9.9a2.25 2.25 0 0 1 3.18 0l1.27 1.27a2.25 2.25 0 0 1 0 3.18L9 19.45 3 20.5Z"
-        fill="currentColor"
-      />
-      <path
-        d="m14.98 7.26 3.76 3.76"
+        d="M4 20h4.2l10-10a2 2 0 0 0 0-2.83l-1.37-1.37a2 2 0 0 0-2.83 0L4 15.8V20Z"
         stroke="currentColor"
-        strokeWidth="1.6"
+        strokeWidth="1.9"
         strokeLinecap="round"
-        opacity="0.55"
+        strokeLinejoin="round"
       />
-      <path
-        d="m6.9 17.1 2.98-.6-2.38-2.38-.6 2.98Z"
-        fill="currentColor"
-        opacity="0.55"
-      />
+      <path d="m12.5 7.5 4 4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
     </svg>
   );
 }

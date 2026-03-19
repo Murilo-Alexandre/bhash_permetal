@@ -22,4 +22,15 @@ if (!(Test-Path $pm2Cmd)) {
 $env:PM2_HOME = $Pm2Home
 Set-Location $ProjectRoot
 
-& $pm2Cmd resurrect | Out-Null
+$bhashApps = @("bhash-backend", "bhash-frontend", "bhash-frontend-admin")
+
+foreach ($appName in $bhashApps) {
+  try {
+    & $pm2Cmd delete $appName | Out-Null
+  } catch {
+    # ignora se o app ainda nao existir
+  }
+}
+
+& $pm2Cmd start "ecosystem.proxy.config.cjs" --update-env | Out-Null
+& $pm2Cmd save --force | Out-Null

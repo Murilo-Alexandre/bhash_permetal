@@ -16,11 +16,39 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   </React.StrictMode>
 );
 
+const isDesktopApp = typeof window !== "undefined" && !!window.bhashDesktop?.isDesktop;
 const shouldRegisterServiceWorker =
-  "serviceWorker" in navigator && (import.meta.env.PROD || import.meta.env.VITE_ENABLE_SW_DEV === "true");
+  !isDesktopApp &&
+  "serviceWorker" in navigator &&
+  (import.meta.env.PROD || import.meta.env.VITE_ENABLE_SW_DEV === "true");
 
-if (shouldRegisterServiceWorker) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
-  });
+async function disableDesktopServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+
+  try {
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(registrations.map((registration) => registration.unregister().catch(() => false)));
+  } catch {
+    // no-op
+  }
+
+  if (!("caches" in window)) return;
+
+  try {
+    const cacheKeys = await caches.keys();
+    await Promise.all(cacheKeys.map((key) => caches.delete(key).catch(() => false)));
+  } catch {
+    // no-op
+  }
 }
+
+window.addEventListener("load", () => {
+  if (isDesktopApp) {
+    void disableDesktopServiceWorker();
+    return;
+  }
+
+  if (shouldRegisterServiceWorker) {
+    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+  }
+});

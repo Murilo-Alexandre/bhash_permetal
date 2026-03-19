@@ -43,6 +43,7 @@ type ReplyToMessage = {
   contentType?: "TEXT" | "IMAGE" | "FILE";
   attachmentUrl?: string | null;
   attachmentName?: string | null;
+  attachmentMime?: string | null;
   sender?: {
     id: string;
     username: string;
@@ -157,6 +158,15 @@ type SearchResponse = {
 type MediaResponse = {
   ok: true;
   items: MediaItem[];
+};
+
+type MediaRetentionPolicyResponse = {
+  ok: true;
+  visible: boolean;
+  enabled?: boolean;
+  interval?: string;
+  intervalLabel?: string;
+  nextRunAt?: string | null;
 };
 
 type ProfileResponse = {
@@ -414,6 +424,114 @@ function formatBytes(bytes?: number | null) {
   return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
 }
 
+const ATTACHMENT_MOJIBAKE_MARKERS = /[ÃÂ�]/u;
+const IMAGE_FILE_RE = /\.(png|jpe?g|webp|gif|bmp|svg|heic|heif|avif)([?#]|$)/i;
+const VIDEO_FILE_RE = /\.(mp4|webm|ogg|ogv|mov|m4v|avi|mkv|3gp|mpeg?|mpg|wmv)([?#]|$)/i;
+const MAX_CHAT_ATTACHMENT_BYTES = 250 * 1024 * 1024;
+
+function attachmentMojibakeScore(value: string) {
+  let score = 0;
+  for (const char of value) {
+    if (char === "�") score += 4;
+    if (char === "Ã" || char === "Â") score += 2;
+  }
+  return score;
+}
+
+function decodeLatin1AsUtf8(value: string) {
+  if (typeof TextDecoder === "undefined") return value;
+  const bytes = Uint8Array.from([...value].map((char) => char.charCodeAt(0) & 0xff));
+  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+}
+
+function normalizeAttachmentDisplayName(value?: string | null) {
+  const raw = String(value ?? "").replace(/\0/g, "").trim();
+  if (!raw) return "";
+
+  const normalized = raw.normalize("NFC");
+  if (!ATTACHMENT_MOJIBAKE_MARKERS.test(normalized)) return normalized;
+
+  try {
+    const decoded = decodeLatin1AsUtf8(normalized).replace(/\0/g, "").trim().normalize("NFC");
+    if (!decoded) return normalized;
+    return attachmentMojibakeScore(decoded) < attachmentMojibakeScore(normalized) ? decoded : normalized;
+  } catch {
+    return normalized;
+  }
+}
+
+function isPdfAttachment(message: Partial<Message>) {
+  const mime = String(message.attachmentMime ?? "").toLowerCase();
+  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  return mime.includes("pdf") || name.endsWith(".pdf") || url.includes(".pdf");
+}
+
+function isImageAttachment(message: Partial<Message>) {
+  const mime = String(message.attachmentMime ?? "").toLowerCase();
+  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  return message.contentType === "IMAGE" || mime.startsWith("image/") || IMAGE_FILE_RE.test(name) || IMAGE_FILE_RE.test(url);
+}
+
+function isVideoAttachment(message: Partial<Message>) {
+  const mime = String(message.attachmentMime ?? "").toLowerCase();
+  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  return mime.startsWith("video/") || VIDEO_FILE_RE.test(name) || VIDEO_FILE_RE.test(url);
+}
+
+function isMediaAttachment(message: Partial<Message>) {
+  return isVideoAttachment(message) || isImageAttachment(message);
+}
+
+function isVideoFileLike(file?: File | null) {
+  if (!file) return false;
+  const type = String(file.type ?? "").toLowerCase();
+  const name = String(file.name ?? "").toLowerCase();
+  return type.startsWith("video/") || VIDEO_FILE_RE.test(name);
+}
+
+function isImageFileLike(file?: File | null) {
+  if (!file) return false;
+  const type = String(file.type ?? "").toLowerCase();
+  const name = String(file.name ?? "").toLowerCase();
+  return type.startsWith("image/") || IMAGE_FILE_RE.test(name);
+}
+
+function isMediaFileLike(file?: File | null) {
+  return isVideoFileLike(file) || isImageFileLike(file);
+}
+
+function buildPdfPreviewUrl(raw?: string | null) {
+  const absolute = toAbsoluteUrl(raw);
+  if (!absolute) return null;
+  const [base] = absolute.split("#");
+  return `${base}#toolbar=0&navpanes=0&scrollbar=0&page=1&view=FitH`;
+}
+
+function mediaLabel(message: Partial<Message>) {
+  if (isVideoAttachment(message)) return "Vídeo";
+  if (isImageAttachment(message)) return "Imagem";
+  if (message.contentType === "FILE") return normalizeAttachmentDisplayName(message.attachmentName) || "Arquivo";
+  return "Mensagem";
+}
+
+const REMOVED_ATTACHMENT_NOTICE_GENERIC =
+  "Esta imagem ou documento foi apagado pelo administrador segundo a política de backup de arquivos.";
+const REMOVED_ATTACHMENT_NOTICE_IMAGE =
+  "Essa imagem foi apagada pelo administrador segundo a política de backup de arquivos.";
+const REMOVED_ATTACHMENT_NOTICE_FILE =
+  "Esse documento foi apagado pelo administrador segundo a política de backup de arquivos.";
+
+function stripAttachmentRemovalNotice(value?: string | null) {
+  let text = String(value ?? "");
+  text = text.replace(REMOVED_ATTACHMENT_NOTICE_IMAGE, "");
+  text = text.replace(REMOVED_ATTACHMENT_NOTICE_FILE, "");
+  text = text.replace(REMOVED_ATTACHMENT_NOTICE_GENERIC, "");
+  return text.trim();
+}
+
 function toAbsoluteUrl(url?: string | null) {
   if (!url) return null;
   if (/^(https?:)?\/\//i.test(url) || url.startsWith("data:") || url.startsWith("blob:")) return url;
@@ -464,20 +582,27 @@ function aggregateReactions(raw?: ReactionRaw[], myId?: string | null): Reaction
 function replyPreviewText(msg?: ReplyToMessage | null) {
   if (!msg) return "Mensagem";
   if (msg.body?.trim()) return msg.body.trim();
-  if (msg.contentType === "IMAGE") return "Imagem";
-  if (msg.contentType === "FILE") return msg.attachmentName || "Arquivo";
+  if (isMediaAttachment(msg)) return isVideoAttachment(msg) ? "Vídeo" : "Imagem";
+  if (msg.contentType === "FILE") return normalizeAttachmentDisplayName(msg.attachmentName) || "Arquivo";
   return "Mensagem";
 }
 
 function messageSearchableText(msg: Partial<Message>) {
-  return [msg.body ?? "", msg.attachmentName ?? ""].join(" ").trim();
+  return [
+    msg.body ?? "",
+    normalizeAttachmentDisplayName(msg.attachmentName),
+    isVideoAttachment(msg) ? "video" : isImageAttachment(msg) ? "imagem" : "",
+  ]
+    .join(" ")
+    .trim();
 }
 
 function messageNotificationPreview(msg: Message) {
   const body = msg.body?.trim();
   if (body) return body.length > 120 ? `${body.slice(0, 117)}...` : body;
-  if (msg.contentType === "IMAGE") return "Imagem";
-  if (msg.contentType === "FILE") return msg.attachmentName ? `Arquivo: ${msg.attachmentName}` : "Arquivo";
+  if (isMediaAttachment(msg)) return isVideoAttachment(msg) ? "Vídeo" : "Imagem";
+  const attachmentName = normalizeAttachmentDisplayName(msg.attachmentName);
+  if (msg.contentType === "FILE") return attachmentName ? `Arquivo: ${attachmentName}` : "Arquivo";
   return "Nova mensagem";
 }
 
@@ -664,6 +789,16 @@ function SendIcon() {
   );
 }
 
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="M12 4v10" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+      <path d="m8 11 4 4 4-4" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 19h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function ArrowUpIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -767,6 +902,7 @@ export function ChatPage() {
   const [messagesNextCursor, setMessagesNextCursor] = useState<string | null>(null);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [messagesErr, setMessagesErr] = useState<string | null>(null);
+  const [sendErr, setSendErr] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
 
   const [text, setText] = useState("");
@@ -794,6 +930,8 @@ export function ChatPage() {
   const [attachmentPreviewUrl, setAttachmentPreviewUrl] = useState<string | null>(null);
 
   const [actionMenuMsgId, setActionMenuMsgId] = useState<string | null>(null);
+  const [actionMenuAlign, setActionMenuAlign] = useState<"left" | "right">("right");
+  const [actionMenuPosition, setActionMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [conversationMenuId, setConversationMenuId] = useState<string | null>(null);
   const [reactionBarMsgId, setReactionBarMsgId] = useState<string | null>(null);
   const [reactionPickerMsgId, setReactionPickerMsgId] = useState<string | null>(null);
@@ -805,6 +943,9 @@ export function ChatPage() {
   const [unreadAnchorMessageId, setUnreadAnchorMessageId] = useState<string | null>(null);
   const [showJumpUnread, setShowJumpUnread] = useState(false);
   const [avatarUploading, setAvatarUploading] = useState(false);
+  const [avatarRemoving, setAvatarRemoving] = useState(false);
+  const [brokenAvatarUrls, setBrokenAvatarUrls] = useState<Set<string>>(new Set());
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -817,6 +958,7 @@ export function ChatPage() {
   const [imageViewerOpen, setImageViewerOpen] = useState(false);
   const [imageViewerItems, setImageViewerItems] = useState<MediaItem[]>([]);
   const [imageViewerIndex, setImageViewerIndex] = useState(0);
+  const [mediaRetentionPolicy, setMediaRetentionPolicy] = useState<MediaRetentionPolicyResponse | null>(null);
   const [imageViewerZoom, setImageViewerZoom] = useState(1);
   const [imageViewerOffset, setImageViewerOffset] = useState({ x: 0, y: 0 });
   const [imageViewerDragging, setImageViewerDragging] = useState(false);
@@ -837,6 +979,9 @@ export function ChatPage() {
   const meIdRef = useRef<string | null>(null);
   const handledRealtimeMessageIdsRef = useRef<Set<string>>(new Set());
   const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
+  const canConsumeUnreadAnchorRef = useRef(false);
+  const hasSeenUnreadMarkerRef = useRef(false);
+  const toastTimerRef = useRef<number | null>(null);
   const imageViewerConvIdRef = useRef<string | null>(null);
   const imageViewerDragRef = useRef<{
     active: boolean;
@@ -845,6 +990,7 @@ export function ChatPage() {
     originX: number;
     originY: number;
   } | null>(null);
+  const actionMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     activeConvIdRef.current = activeConv?.id ?? null;
@@ -873,8 +1019,17 @@ export function ChatPage() {
   }, [attachmentPreviewUrl]);
 
   useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     function closeMenus() {
       setActionMenuMsgId(null);
+      setActionMenuPosition(null);
       setEmojiOpen(false);
       setConversationMenuId(null);
       setReactionBarMsgId(null);
@@ -936,7 +1091,29 @@ export function ChatPage() {
     const listRect = el.getBoundingClientRect();
     const anchorRect = unreadAnchor.getBoundingClientRect();
     const isAbove = anchorRect.bottom < listRect.top + 2;
-    setShowJumpUnread(isAbove);
+    const isBelow = anchorRect.top > listRect.bottom - 2;
+    const isVisible = !isAbove && !isBelow;
+
+    if (isVisible) {
+      hasSeenUnreadMarkerRef.current = true;
+      setShowJumpUnread(false);
+      return;
+    }
+
+    if (isAbove) {
+      if (canConsumeUnreadAnchorRef.current && hasSeenUnreadMarkerRef.current) {
+        hasSeenUnreadMarkerRef.current = false;
+        canConsumeUnreadAnchorRef.current = false;
+        setUnreadAnchorMessageId(null);
+        setShowJumpUnread(false);
+        return;
+      }
+
+      setShowJumpUnread(true);
+      return;
+    }
+
+    setShowJumpUnread(false);
   }
 
   function messageListDistanceFromBottom(el: HTMLDivElement) {
@@ -961,6 +1138,7 @@ export function ChatPage() {
     setAttachmentFile(null);
     setAttachmentMode(null);
     setAttachmentPreviewUrl(null);
+    setSendErr(null);
     if (imageInputRef.current) imageInputRef.current.value = "";
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
@@ -1106,9 +1284,9 @@ export function ChatPage() {
     return Math.max(1, Math.min(5, value));
   }
 
-  function normalizeMediaImageItems(items: MediaItem[]) {
+  function normalizeMediaItems(items: MediaItem[]) {
     return [...items]
-      .filter((item) => item.contentType === "IMAGE" && !!item.attachmentUrl)
+      .filter((item) => isMediaAttachment(item) && !!item.attachmentUrl)
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   }
 
@@ -1117,7 +1295,7 @@ export function ChatPage() {
     const res = await api.get<MediaResponse>(`/conversations/${conversationId}/media`, {
       params: { kind: "image" },
     });
-    return normalizeMediaImageItems(res.data.items ?? []);
+    return normalizeMediaItems(res.data.items ?? []);
   }
 
   function resolveViewerIndex(items: MediaItem[], targetMessageId: string) {
@@ -1131,7 +1309,7 @@ export function ChatPage() {
     const imageUrl = toAbsoluteUrl(message.attachmentUrl);
     if (!conversationId || !imageUrl) return;
 
-    const fromCurrentMessages = normalizeMediaImageItems(messages);
+    const fromCurrentMessages = normalizeMediaItems(messages);
     const fallbackItems = fromCurrentMessages.length ? fromCurrentMessages : [message];
     const fallbackIndex = resolveViewerIndex(fallbackItems, message.id);
 
@@ -1175,16 +1353,105 @@ export function ChatPage() {
     }
   }
 
-  function openActionMenu(e: ReactMouseEvent, messageId: string) {
+  function openActionMenu(e: ReactMouseEvent, messageId: string, isMine: boolean) {
     e.stopPropagation();
     setConversationMenuId(null);
     setReactionBarMsgId(null);
     setReactionPickerMsgId(null);
-    setActionMenuMsgId((prev) => (prev === messageId ? null : messageId));
+    setActionMenuAlign(isMine ? "right" : "left");
+    setActionMenuPosition(null);
+    setActionMenuMsgId((prev) => {
+      const next = prev === messageId ? null : messageId;
+      if (!next) {
+        setActionMenuPosition(null);
+      }
+      return next;
+    });
   }
 
-  function copyText(v: string) {
-    void navigator.clipboard.writeText(v);
+  function showToast(message: string) {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    setToastMessage(message);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+      toastTimerRef.current = null;
+    }, 1800);
+  }
+
+  async function copyText(v: string, successMessage = "Copiado") {
+    try {
+      await navigator.clipboard.writeText(v);
+      showToast(successMessage);
+    } catch {
+      setSendErr("Não foi possível copiar agora.");
+    }
+  }
+
+  function attachmentDownloadName(message: Partial<Message>) {
+    const normalized = normalizeAttachmentDisplayName(message.attachmentName);
+    if (normalized) return normalized;
+    if (isVideoAttachment(message)) return "video";
+    if (isImageAttachment(message)) return "imagem";
+    return "arquivo";
+  }
+
+  async function triggerBrowserDownload(url: string, filename: string) {
+    try {
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 2000);
+      return;
+    } catch {}
+
+    const fallback = document.createElement("a");
+    fallback.href = url;
+    fallback.download = filename;
+    fallback.target = "_blank";
+    fallback.rel = "noreferrer";
+    document.body.appendChild(fallback);
+    fallback.click();
+    fallback.remove();
+  }
+
+  async function downloadAttachment(message: Partial<Message>) {
+    const absoluteUrl = toAbsoluteUrl(message.attachmentUrl);
+    if (!absoluteUrl) return;
+    await triggerBrowserDownload(absoluteUrl, attachmentDownloadName(message));
+  }
+
+  function removeMessagesFromLocalState(messageIds: string[]) {
+    if (!messageIds.length) return;
+    const ids = new Set(messageIds);
+    setMessages((prev) => prev.filter((m) => !ids.has(m.id)));
+    setSearchHits((prev) => prev.filter((m) => !ids.has(m.id)));
+    setProfileMediaItems((prev) => prev.filter((m) => !ids.has(m.id)));
+    setImageViewerItems((prev) => prev.filter((m) => !ids.has(m.id)));
+    if (replyTo && ids.has(replyTo.id)) setReplyTo(null);
+    if (currentViewerItem && ids.has(currentViewerItem.id)) closeImageViewer();
+  }
+
+  async function hideMessageForMe(message: Message) {
+    const ok = window.confirm("Apagar esta mensagem apenas do seu chat?");
+    if (!ok) return;
+
+    try {
+      await api.delete(`/messages/${message.id}`);
+      removeMessagesFromLocalState([message.id]);
+      setActionMenuMsgId(null);
+      setReactionBarMsgId(null);
+      setReactionPickerMsgId(null);
+      await loadConversations(activeConvIdRef.current ?? undefined);
+    } catch {}
   }
 
   function mergeMessageIntoList(message: Message) {
@@ -1272,11 +1539,14 @@ export function ChatPage() {
     setSearchErr(null);
     setHighlightTerm("");
     setMessagesErr(null);
+    setSendErr(null);
     setReplyTo(null);
     setActionMenuMsgId(null);
     setConversationMenuId(null);
     setUnreadAnchorMessageId(null);
     setShowJumpUnread(false);
+    canConsumeUnreadAnchorRef.current = false;
+    hasSeenUnreadMarkerRef.current = false;
     clearComposerAttachment();
     setConversations((prev) =>
       sortConversationItems(
@@ -1291,6 +1561,7 @@ export function ChatPage() {
     const loadedMessages = (await loadMessages(conv.id)) ?? [];
     const unreadAnchorId = resolveUnreadAnchorMessageId(loadedMessages, unreadCountBeforeOpen);
     setUnreadAnchorMessageId(unreadAnchorId);
+    hasSeenUnreadMarkerRef.current = false;
     await markConversationRead(conv.id);
     if (focusMessageId) {
       const msgExists = loadedMessages.some((msg) => msg.id === focusMessageId);
@@ -1504,9 +1775,21 @@ export function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQ, searchMode, searchOpen, activeConv?.id]);
 
-  function handleImagePicked(e: ChangeEvent<HTMLInputElement>) {
+  function handleMediaPicked(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (!isMediaFileLike(file)) {
+      setSendErr("Selecione uma imagem ou vídeo válido.");
+      e.currentTarget.value = "";
+      return;
+    }
+
+    if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+      setSendErr(`A mídia excede o limite de ${formatBytes(MAX_CHAT_ATTACHMENT_BYTES)}.`);
+      e.currentTarget.value = "";
+      return;
+    }
 
     clearComposerAttachment();
     const previewUrl = URL.createObjectURL(file);
@@ -1518,6 +1801,12 @@ export function ChatPage() {
   function handleFilePicked(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+      setSendErr(`O arquivo excede o limite de ${formatBytes(MAX_CHAT_ATTACHMENT_BYTES)}.`);
+      e.currentTarget.value = "";
+      return;
+    }
 
     clearComposerAttachment();
     setAttachmentFile(file);
@@ -1535,7 +1824,14 @@ export function ChatPage() {
 
     if (!hasText && !hasAttachment) return;
 
+    setSendErr(null);
+
     if (hasAttachment) {
+      if ((attachmentFile?.size ?? 0) > MAX_CHAT_ATTACHMENT_BYTES) {
+        setSendErr(`O anexo excede o limite de ${formatBytes(MAX_CHAT_ATTACHMENT_BYTES)}.`);
+        return;
+      }
+
       if (sending) return;
       setSending(true);
       try {
@@ -1557,6 +1853,17 @@ export function ChatPage() {
         scrollToBottom();
         setShowJumpNew(false);
         setNewMsgsCount(0);
+      } catch (e: any) {
+        const apiMessage = e?.response?.data?.message;
+        const status = Number(e?.response?.status ?? 0);
+        if (status === 413) {
+          setSendErr(`O vídeo/arquivo excede o limite de ${formatBytes(MAX_CHAT_ATTACHMENT_BYTES)}.`);
+        } else if (typeof apiMessage === "string" && apiMessage.trim()) {
+          setSendErr(apiMessage.trim());
+        } else {
+          setSendErr("Não foi possível enviar o anexo. Tente novamente.");
+        }
+        return;
       } finally {
         setSending(false);
       }
@@ -1607,9 +1914,10 @@ export function ChatPage() {
     if (!selectedMessageIds.length) return;
     try {
       await api.post('/messages/hide-many', { messageIds: selectedMessageIds });
-      setMessages((prev) => prev.filter((m) => !selectedMessageIds.includes(m.id)));
+      removeMessagesFromLocalState(selectedMessageIds);
       setSelectedMessageIds([]);
       setMultiDeleteMode(false);
+      await loadConversations(activeConvIdRef.current ?? undefined);
     } catch {}
   }
 
@@ -1696,11 +2004,42 @@ export function ChatPage() {
     setAvatarUploading(true);
     try {
       await api.post('/me/avatar', form, { headers: { "Content-Type": "multipart/form-data" } });
+      setBrokenAvatarUrls(new Set());
       await loadMe();
       await loadConversations(activeConvIdRef.current ?? undefined);
     } finally {
       setAvatarUploading(false);
     }
+  }
+
+  async function removeMyAvatar() {
+    setAvatarRemoving(true);
+    try {
+      await api.delete("/me/avatar");
+      setBrokenAvatarUrls(new Set());
+      await loadMe();
+      await loadConversations(activeConvIdRef.current ?? undefined);
+    } finally {
+      setAvatarRemoving(false);
+    }
+  }
+
+  function resolveAvatarUrl(rawUrl?: string | null) {
+    const absolute = toAbsoluteUrl(rawUrl);
+    if (!absolute) return null;
+    if (brokenAvatarUrls.has(absolute)) return null;
+    return absolute;
+  }
+
+  function markAvatarBroken(rawUrl?: string | null) {
+    const absolute = toAbsoluteUrl(rawUrl);
+    if (!absolute) return;
+    setBrokenAvatarUrls((prev) => {
+      if (prev.has(absolute)) return prev;
+      const next = new Set(prev);
+      next.add(absolute);
+      return next;
+    });
   }
 
 
@@ -1798,6 +2137,7 @@ export function ChatPage() {
 
   const currentViewerItem = imageViewerItems[imageViewerIndex] ?? null;
   const currentViewerUrl = toAbsoluteUrl(currentViewerItem?.attachmentUrl);
+  const currentViewerIsVideo = currentViewerItem ? isVideoAttachment(currentViewerItem) : false;
   const canViewPrev = imageViewerIndex > 0;
   const canViewNext = imageViewerIndex < imageViewerItems.length - 1;
   const showMobileSidebar = !isMobileLayout || !activeConv;
@@ -1864,13 +2204,13 @@ export function ChatPage() {
 
     s.on("message:hidden", (payload: { messageId: string; conversationId: string }) => {
       if (payload.conversationId === activeConvIdRef.current) {
-        setMessages((prev) => prev.filter((m) => m.id !== payload.messageId));
+        removeMessagesFromLocalState([payload.messageId]);
       }
     });
 
     s.on("messages:hidden", (payload: { messageIds: string[]; conversationId: string }) => {
       if (payload.conversationId === activeConvIdRef.current) {
-        setMessages((prev) => prev.filter((m) => !payload.messageIds.includes(m.id)));
+        removeMessagesFromLocalState(payload.messageIds);
       }
     });
 
@@ -1979,6 +2319,30 @@ export function ChatPage() {
   }, [activeConv?.id]);
 
   useEffect(() => {
+    const conversationId = activeConv?.id;
+    if (!conversationId) {
+      setMediaRetentionPolicy(null);
+      return;
+    }
+
+    let canceled = false;
+    api
+      .get<MediaRetentionPolicyResponse>(`/conversations/${conversationId}/media-retention-policy`)
+      .then((res) => {
+        if (canceled) return;
+        setMediaRetentionPolicy(res.data);
+      })
+      .catch(() => {
+        if (canceled) return;
+        setMediaRetentionPolicy(null);
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [activeConv?.id, api]);
+
+  useEffect(() => {
     syncUnreadJumpButton();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, unreadAnchorMessageId, activeConv?.id]);
@@ -2011,6 +2375,53 @@ export function ChatPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!actionMenuMsgId) {
+      setActionMenuPosition(null);
+      return;
+    }
+
+    const updatePosition = () => {
+      const trigger = document.querySelector<HTMLElement>(`[data-msg-menu-trigger="${actionMenuMsgId}"]`);
+      const menu = actionMenuRef.current;
+      if (!trigger || !menu) return;
+
+      const triggerRect = trigger.getBoundingClientRect();
+      const menuRect = menu.getBoundingClientRect();
+      const viewportPadding = 12;
+      const gap = 6;
+
+      const availableBelow = window.innerHeight - triggerRect.bottom - viewportPadding;
+      const availableAbove = triggerRect.top - viewportPadding;
+      const shouldOpenUp = availableBelow < menuRect.height + gap && availableAbove > availableBelow;
+
+      const top = shouldOpenUp
+        ? Math.max(viewportPadding, triggerRect.top - menuRect.height - gap)
+        : Math.min(window.innerHeight - viewportPadding - menuRect.height, triggerRect.bottom + gap);
+
+      let left =
+        actionMenuAlign === "right"
+          ? triggerRect.right - menuRect.width
+          : triggerRect.left;
+      left = Math.max(viewportPadding, Math.min(left, window.innerWidth - viewportPadding - menuRect.width));
+
+      setActionMenuPosition((prev) =>
+        prev && prev.top === top && prev.left === left ? prev : { top, left }
+      );
+    };
+
+    const raf = requestAnimationFrame(updatePosition);
+    const scrollHost = msgListRef.current;
+    scrollHost?.addEventListener("scroll", updatePosition, { passive: true });
+    window.addEventListener("resize", updatePosition);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      scrollHost?.removeEventListener("scroll", updatePosition);
+      window.removeEventListener("resize", updatePosition);
+    };
+  }, [actionMenuAlign, actionMenuMsgId, reactionBarMsgId, reactionPickerMsgId]);
 
   return (
     <div className="chat-shell">
@@ -2052,7 +2463,7 @@ export function ChatPage() {
               conversations.map((conv) => {
                 const other = conv.otherUser;
                 const active = activeConv?.id === conv.id;
-                const avatar = toAbsoluteUrl(other.avatarUrl);
+                const avatar = resolveAvatarUrl(other.avatarUrl);
 
                 return (
                   <div key={conv.id} className="chat-convCardWrap" data-conv-id={conv.id}>
@@ -2062,7 +2473,7 @@ export function ChatPage() {
                     >
                       <div className="chat-avatar chat-avatar--md">
                         {avatar ? (
-                          <img src={avatar} alt={other.name} />
+                          <img src={avatar} alt={other.name} onError={() => markAvatarBroken(other.avatarUrl)} />
                         ) : (
                           <span>{other.name.slice(0, 1).toUpperCase()}</span>
                         )}
@@ -2075,10 +2486,10 @@ export function ChatPage() {
                         </div>
                         <div className="chat-convCard__meta">
                           {conv.lastMessage?.body?.trim() ||
-                            (conv.lastMessage?.contentType === "IMAGE"
-                              ? "Imagem"
+                            (isMediaAttachment(conv.lastMessage ?? {})
+                              ? mediaLabel(conv.lastMessage ?? {})
                               : conv.lastMessage?.contentType === "FILE"
-                              ? conv.lastMessage?.attachmentName || "Arquivo"
+                              ? normalizeAttachmentDisplayName(conv.lastMessage?.attachmentName) || "Arquivo"
                               : `${other.department?.name ?? "Sem setor"}${other.company?.name ? ` • ${other.company.name}` : ""}`)}
                         </div>
                       </div>
@@ -2157,8 +2568,12 @@ export function ChatPage() {
                   <div className="chat-avatar chat-avatar--lg">
                     {(() => {
                       const other = activeConv.otherUser;
-                      const avatar = toAbsoluteUrl(other.avatarUrl);
-                      return avatar ? <img src={avatar} alt={other.name} /> : <span>{other.name.slice(0, 1).toUpperCase()}</span>;
+                      const avatar = resolveAvatarUrl(other.avatarUrl);
+                      return avatar ? (
+                        <img src={avatar} alt={other.name} onError={() => markAvatarBroken(other.avatarUrl)} />
+                      ) : (
+                        <span>{other.name.slice(0, 1).toUpperCase()}</span>
+                      );
                     })()}
                   </div>
 
@@ -2206,6 +2621,9 @@ export function ChatPage() {
                 if (!el) return;
                 const nearBottom = isMessageListNearBottom(el, 120);
                 isMsgListNearBottomRef.current = nearBottom;
+                if (unreadAnchorMessageId && !nearBottom) {
+                  canConsumeUnreadAnchorRef.current = true;
+                }
                 if (nearBottom) {
                   setShowJumpNew(false);
                   setNewMsgsCount(0);
@@ -2255,6 +2673,10 @@ export function ChatPage() {
                       const msg = row.value;
                       const isMine = me?.id === msg.senderId;
                       const imageUrl = toAbsoluteUrl(msg.attachmentUrl);
+                      const pdfPreviewUrl = isPdfAttachment(msg) ? buildPdfPreviewUrl(msg.attachmentUrl) : null;
+                      const isRemovedImageAttachment = msg.contentType === "IMAGE" && !imageUrl && !!msg.deletedAt;
+                      const isRemovedFileAttachment = msg.contentType === "FILE" && !imageUrl && !!msg.deletedAt;
+                      const bodyWithoutRemovedNotice = stripAttachmentRemovalNotice(msg.body);
                       const replyPreview = replyPreviewText(msg.replyTo);
                       const reactions = aggregateReactions(msg.reactions, me?.id ?? null);
 
@@ -2283,7 +2705,8 @@ export function ChatPage() {
                             {!msg.deletedAt ? (
                               <button
                                 className="chat-msgMenuBtn"
-                                onClick={(e) => openActionMenu(e, msg.id)}
+                                data-msg-menu-trigger={msg.id}
+                                onClick={(e) => openActionMenu(e, msg.id, isMine)}
                                 title="Ações"
                               >
                                 <DotsIcon />
@@ -2291,7 +2714,16 @@ export function ChatPage() {
                             ) : null}
 
                             {actionMenuMsgId === msg.id && !msg.deletedAt ? (
-                              <div className="chat-msgMenu" onClick={(e) => e.stopPropagation()}>
+                              <div
+                                ref={actionMenuRef}
+                                className="chat-msgMenu chat-msgMenu--floating"
+                                style={
+                                  actionMenuPosition
+                                    ? { top: actionMenuPosition.top, left: actionMenuPosition.left }
+                                    : { visibility: "hidden" }
+                                }
+                                onClick={(e) => e.stopPropagation()}
+                              >
                                 <button
                                   className="chat-msgMenu__item"
                                   onClick={() => {
@@ -2373,7 +2805,7 @@ export function ChatPage() {
                                     const content =
                                       msg.body?.trim() ||
                                       msg.attachmentUrl ||
-                                      msg.attachmentName ||
+                                      normalizeAttachmentDisplayName(msg.attachmentName) ||
                                       "";
                                     if (content) copyText(content);
                                     setReactionBarMsgId(null);
@@ -2384,6 +2816,21 @@ export function ChatPage() {
                                   <CopyIcon />
                                   <span>Copiar</span>
                                 </button>
+
+                                {msg.attachmentUrl ? (
+                                  <button
+                                    className="chat-msgMenu__item"
+                                    onClick={() => {
+                                      void downloadAttachment(msg);
+                                      setReactionBarMsgId(null);
+                                      setReactionPickerMsgId(null);
+                                      setActionMenuMsgId(null);
+                                    }}
+                                  >
+                                    <DownloadIcon />
+                                    <span>Baixar</span>
+                                  </button>
+                                ) : null}
 
                                 <button
                                   className="chat-msgMenu__item"
@@ -2401,15 +2848,11 @@ export function ChatPage() {
                                 <button
                                   className="chat-msgMenu__item chat-msgMenu__item--danger"
                                   onClick={() => {
-                                    setMultiDeleteMode(true);
-                                    setSelectedMessageIds([msg.id]);
-                                    setReactionBarMsgId(null);
-                                    setReactionPickerMsgId(null);
-                                    setActionMenuMsgId(null);
+                                    void hideMessageForMe(msg);
                                   }}
                                 >
                                   <TrashIcon />
-                                  <span>Apagar</span>
+                                  <span>Apagar do meu chat</span>
                                 </button>
                               </div>
                             ) : null}
@@ -2423,43 +2866,98 @@ export function ChatPage() {
                               </div>
                             ) : null}
 
-                            {msg.contentType === "IMAGE" && imageUrl ? (
+                            {isMediaAttachment(msg) && imageUrl ? (
                               <button
                                 type="button"
                                 className="chat-imageLink chat-imageLink--btn"
                                 onClick={() => void openImageViewer(msg)}
-                                title="Abrir imagem"
+                                title={isVideoAttachment(msg) ? "Abrir mídia" : "Abrir imagem"}
                               >
-                                <img src={imageUrl} alt={msg.attachmentName ?? "imagem"} className="chat-imagePreview" />
+                                {isVideoAttachment(msg) ? (
+                                  <div className="chat-videoPreview">
+                                    <video
+                                      src={imageUrl}
+                                      className="chat-imagePreview"
+                                      preload="metadata"
+                                      muted
+                                      playsInline
+                                    />
+                                    <span className="chat-videoPreview__badge">Vídeo</span>
+                                  </div>
+                                ) : (
+                                  <img
+                                    src={imageUrl}
+                                    alt={normalizeAttachmentDisplayName(msg.attachmentName) || "imagem"}
+                                    className="chat-imagePreview"
+                                  />
+                                )}
                               </button>
                             ) : null}
 
-                            {msg.contentType === "FILE" && imageUrl ? (
+                            {isRemovedImageAttachment ? (
+                              <div className="chat-removedAttachment chat-removedAttachment--image">
+                                <div className="chat-removedAttachment__icon" aria-hidden="true">
+                                  <ImageIcon />
+                                </div>
+                                <div className="chat-removedAttachment__title">Essa imagem foi apagada</div>
+                                <div className="chat-removedAttachment__desc">
+                                  Pelo administrador segundo a política de backup de arquivos.
+                                </div>
+                              </div>
+                            ) : null}
+
+                            {!isMediaAttachment(msg) && msg.contentType === "FILE" && imageUrl ? (
                               <a
                                 href={imageUrl}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="chat-fileCard"
+                                className={`chat-fileCard ${pdfPreviewUrl ? "chat-fileCard--pdf" : ""}`}
                               >
-                                <div className="chat-fileCard__icon">
-                                  <FileIcon />
-                                </div>
-                                <div className="chat-fileCard__text">
-                                  <div className="chat-fileCard__name">{msg.attachmentName ?? "Arquivo"}</div>
-                                  <div className="chat-fileCard__meta">
-                                    {msg.attachmentMime ?? "Arquivo"}
-                                    {msg.attachmentSize ? ` • ${formatBytes(msg.attachmentSize)}` : ""}
+                                {pdfPreviewUrl ? (
+                                  <div className="chat-fileCard__preview" aria-hidden="true">
+                                    <iframe
+                                      src={pdfPreviewUrl}
+                                      title={normalizeAttachmentDisplayName(msg.attachmentName) || "Pré-visualização do PDF"}
+                                      loading="lazy"
+                                      tabIndex={-1}
+                                    />
+                                  </div>
+                                ) : null}
+                                <div className="chat-fileCard__body">
+                                  <div className="chat-fileCard__icon">
+                                    <FileIcon />
+                                  </div>
+                                  <div className="chat-fileCard__text">
+                                    <div className="chat-fileCard__name">
+                                      {normalizeAttachmentDisplayName(msg.attachmentName) || "Arquivo"}
+                                    </div>
+                                    <div className="chat-fileCard__meta">
+                                      {msg.attachmentMime ?? "Arquivo"}
+                                      {msg.attachmentSize ? ` • ${formatBytes(msg.attachmentSize)}` : ""}
+                                    </div>
                                   </div>
                                 </div>
                               </a>
                             ) : null}
 
-                            {msg.body?.trim() ? (
+                            {isRemovedFileAttachment ? (
+                              <div className="chat-removedAttachment chat-removedAttachment--file">
+                                <div className="chat-removedAttachment__icon" aria-hidden="true">
+                                  <FileIcon />
+                                </div>
+                                <div className="chat-removedAttachment__title">Esse documento foi apagado</div>
+                                <div className="chat-removedAttachment__desc">
+                                  Pelo administrador segundo a política de backup de arquivos.
+                                </div>
+                              </div>
+                            ) : null}
+
+                            {bodyWithoutRemovedNotice ? (
                               <div className="chat-bubble__body">
                                 {highlightTerm.trim() ? (
-                                  <HighlightText text={msg.body} query={highlightTerm} />
+                                  <HighlightText text={bodyWithoutRemovedNotice} query={highlightTerm} />
                                 ) : (
-                                  msg.body
+                                  bodyWithoutRemovedNotice
                                 )}
                               </div>
                             ) : null}
@@ -2563,10 +3061,10 @@ export function ChatPage() {
                           <HighlightText
                             text={
                               hit.body?.trim() ||
-                              (hit.contentType === "IMAGE"
-                                ? "Imagem"
+                              (isMediaAttachment(hit)
+                                ? mediaLabel(hit)
                                 : hit.contentType === "FILE"
-                                ? hit.attachmentName || "Arquivo"
+                                ? normalizeAttachmentDisplayName(hit.attachmentName) || "Arquivo"
                                 : "")
                             }
                             query={searchQ.trim()}
@@ -2586,7 +3084,7 @@ export function ChatPage() {
                 onClick={() => {
                   scrollToUnreadAnchor();
                 }}
-                title="Ir para a primeira mensagem não lida"
+                aria-label="Ir para a primeira mensagem não lida"
               >
                 <span className="chat-jumpUnreadBtn__icon" aria-hidden="true">
                   <ArrowUpIcon />
@@ -2603,7 +3101,7 @@ export function ChatPage() {
                   setShowJumpNew(false);
                   setNewMsgsCount(0);
                 }}
-                title="Ir para mensagens novas"
+                aria-label="Ir para mensagens novas"
               >
                 <span className="chat-jumpNewBtn__icon" aria-hidden="true">
                   <ArrowDownIcon />
@@ -2639,7 +3137,17 @@ export function ChatPage() {
             {attachmentFile ? (
               <div className="chat-attachmentPreview">
                 {attachmentMode === "image" && attachmentPreviewUrl ? (
-                  <img src={attachmentPreviewUrl} alt="preview" className="chat-attachmentPreview__image" />
+                  isVideoFileLike(attachmentFile) ? (
+                    <video
+                      src={attachmentPreviewUrl}
+                      className="chat-attachmentPreview__image"
+                      preload="metadata"
+                      muted
+                      playsInline
+                    />
+                  ) : (
+                    <img src={attachmentPreviewUrl} alt="preview" className="chat-attachmentPreview__image" />
+                  )
                 ) : (
                   <div className="chat-attachmentPreview__file">
                     <FileIcon />
@@ -2655,6 +3163,8 @@ export function ChatPage() {
                 </button>
               </div>
             ) : null}
+
+            {sendErr ? <div className="chat-error">{sendErr}</div> : null}
 
             <div className="chat-composer">
               <div className="chat-composer__actions">
@@ -2673,7 +3183,7 @@ export function ChatPage() {
                 <button
                   className="chat-iconBtn"
                   onClick={() => imageInputRef.current?.click()}
-                  title="Enviar imagem"
+                  title="Enviar mídia"
                   disabled={!activeConv}
                 >
                   <ImageIcon />
@@ -2691,9 +3201,9 @@ export function ChatPage() {
                 <input
                   ref={imageInputRef}
                   type="file"
-                  accept="image/*"
+                  accept="image/*,video/*"
                   style={{ display: "none" }}
-                  onChange={handleImagePicked}
+                  onChange={handleMediaPicked}
                 />
 
                 <input
@@ -2762,52 +3272,81 @@ export function ChatPage() {
             </div>
 
             <div className="chat-profileDrawer__body">
-              <div className="chat-contactCard">
-                <div className="chat-avatar chat-avatar--xl">
-                  {toAbsoluteUrl(me?.avatarUrl) ? (
-                    <img src={toAbsoluteUrl(me?.avatarUrl) ?? ""} alt={me?.name ?? "Meu perfil"} />
-                  ) : (
-                    <span>{(me?.name ?? "U").slice(0, 1).toUpperCase()}</span>
-                  )}
-                </div>
+              {(() => {
+                const myAvatarUrl = resolveAvatarUrl(me?.avatarUrl);
+                const hasMyAvatar = !!myAvatarUrl;
+                const avatarBusy = avatarUploading || avatarRemoving;
 
-                <div className="chat-contactCard__name">{me?.name ?? "Usuário"}</div>
-              </div>
+                return (
+                  <>
+                    <div className="chat-contactCard">
+                      <div className="chat-avatar chat-avatar--xl">
+                        {hasMyAvatar ? (
+                          <img
+                            src={myAvatarUrl ?? ""}
+                            alt={me?.name ?? "Meu perfil"}
+                            onError={() => markAvatarBroken(me?.avatarUrl)}
+                          />
+                        ) : (
+                          <span>{(me?.name ?? "U").slice(0, 1).toUpperCase()}</span>
+                        )}
+                      </div>
 
-              <div className="chat-sectionTitle">Dados do perfil</div>
-              <div className="chat-contactCard__info chat-contactCard__info--left">
-                <div><strong>Nome:</strong> {me?.name ?? "-"}</div>
-                <div><strong>E-mail:</strong> {me?.email || "Sem e-mail"}</div>
-                <div><strong>Empresa:</strong> {me?.company?.name ?? "Sem empresa"}</div>
-                <div><strong>Setor:</strong> {me?.department?.name ?? "Sem setor"}</div>
-                <div><strong>Ramal:</strong> {me?.extension || "Sem ramal"}</div>
-                <div><strong>Foto de perfil:</strong> {me?.avatarUrl ? "Enviada" : "Sem foto"}</div>
-              </div>
+                      <div className="chat-contactCard__name">{me?.name ?? "Usuário"}</div>
+                    </div>
 
-              <div className="chat-myInfoActions">
-                <button
-                  className="chat-primaryBtn"
-                  onClick={() => myAvatarInputRef.current?.click()}
-                  disabled={avatarUploading}
-                >
-                  {avatarUploading
-                    ? "Enviando..."
-                    : me?.avatarUrl
-                    ? "Alterar foto existente"
-                    : "Enviar nova foto"}
-                </button>
-                <input
-                  ref={myAvatarInputRef}
-                  type="file"
-                  accept="image/*"
-                  style={{ display: "none" }}
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) void uploadMyAvatar(file);
-                    e.currentTarget.value = "";
-                  }}
-                />
-              </div>
+                    <div className="chat-sectionTitle">Dados do perfil</div>
+                    <div className="chat-contactCard__info chat-contactCard__info--left">
+                      <div><strong>Nome:</strong> {me?.name ?? "-"}</div>
+                      <div><strong>E-mail:</strong> {me?.email || "Sem e-mail"}</div>
+                      <div><strong>Empresa:</strong> {me?.company?.name ?? "Sem empresa"}</div>
+                      <div><strong>Setor:</strong> {me?.department?.name ?? "Sem setor"}</div>
+                      <div><strong>Ramal:</strong> {me?.extension || "Sem ramal"}</div>
+                      <div><strong>Foto de perfil:</strong> {hasMyAvatar ? "Enviada" : "Sem foto"}</div>
+                    </div>
+
+                    <div className="chat-myInfoActions">
+                      {hasMyAvatar ? (
+                        <>
+                          <button
+                            className="chat-primaryBtn"
+                            onClick={() => myAvatarInputRef.current?.click()}
+                            disabled={avatarBusy}
+                          >
+                            {avatarUploading ? "Enviando..." : "Alterar foto"}
+                          </button>
+                          <button
+                            className="chat-dangerBtn"
+                            onClick={() => void removeMyAvatar()}
+                            disabled={avatarBusy}
+                          >
+                            {avatarRemoving ? "Removendo..." : "Remover foto"}
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          className="chat-primaryBtn"
+                          onClick={() => myAvatarInputRef.current?.click()}
+                          disabled={avatarBusy}
+                        >
+                          {avatarUploading ? "Enviando..." : "Enviar foto de perfil"}
+                        </button>
+                      )}
+                      <input
+                        ref={myAvatarInputRef}
+                        type="file"
+                        accept="image/*"
+                        style={{ display: "none" }}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) void uploadMyAvatar(file);
+                          e.currentTarget.value = "";
+                        }}
+                      />
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </div>
         </div>
@@ -2815,7 +3354,7 @@ export function ChatPage() {
 
       {pickerOpen ? (
         <div className="chat-modalBackdrop" onClick={() => setPickerOpen(false)}>
-          <div className="chat-modal chat-modal--wide" onClick={(e) => e.stopPropagation()}>
+          <div className="chat-modal chat-modal--wide chat-modal--picker" onClick={(e) => e.stopPropagation()}>
             <div className="chat-modal__header">
               <div className="chat-modal__title">Nova conversa</div>
               <button className="chat-iconBtn" onClick={() => setPickerOpen(false)}>
@@ -2890,14 +3429,17 @@ export function ChatPage() {
                             >
                               <div className="chat-userCell chat-userCell--name">
                                 <div className="chat-avatar chat-avatar--sm">
-                                  {toAbsoluteUrl(user.avatarUrl) ? (
-                                    <img src={toAbsoluteUrl(user.avatarUrl) ?? ""} alt={user.name} />
+                                  {resolveAvatarUrl(user.avatarUrl) ? (
+                                    <img
+                                      src={resolveAvatarUrl(user.avatarUrl) ?? ""}
+                                      alt={user.name}
+                                      onError={() => markAvatarBroken(user.avatarUrl)}
+                                    />
                                   ) : (
                                     <span>{user.name.slice(0, 1).toUpperCase()}</span>
                                   )}
                                 </div>
                                 <div className="chat-userRow__identity">
-                                  <span className="chat-userFieldLabel">Nome:</span>
                                   <span className="chat-userRow__name">{user.name}</span>
                                 </div>
                               </div>
@@ -2910,7 +3452,9 @@ export function ChatPage() {
                                     className="chat-iconBtn chat-iconBtn--sm"
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      if (user.email) copyText(user.email);
+                                      if (user.email) {
+                                        void copyText(user.email, "E-mail copiado");
+                                      }
                                     }}
                                     title={user.email ? "Copiar e-mail" : "Sem e-mail para copiar"}
                                     disabled={!user.email}
@@ -2942,32 +3486,65 @@ export function ChatPage() {
           <div className="chat-imageViewer__topBar" onClick={(e) => e.stopPropagation()}>
             <div className="chat-imageViewer__meta">
               <div className="chat-imageViewer__title">
-                {currentViewerItem?.attachmentName || "Imagem"}
+                {normalizeAttachmentDisplayName(currentViewerItem?.attachmentName) || (currentViewerIsVideo ? "Vídeo" : "Imagem")}
               </div>
               <div className="chat-imageViewer__sub">
                 {imageViewerItems.length
                   ? `${imageViewerIndex + 1} de ${imageViewerItems.length}`
-                  : "Sem imagens"}
+                  : "Sem mídias"}
                 {currentViewerItem?.createdAt ? ` • ${fmtDateTime(currentViewerItem.createdAt)}` : ""}
               </div>
+              {mediaRetentionPolicy?.visible ? (
+                <div className="chat-imageViewer__sub" style={{ marginTop: 4, opacity: 0.92 }}>
+                  {mediaRetentionPolicy.enabled
+                    ? `A política de backup está configurada para ${
+                        mediaRetentionPolicy.intervalLabel ?? mediaRetentionPolicy.interval ?? "periodicidade definida pelo administrador"
+                      }. Próxima exclusão: ${
+                        mediaRetentionPolicy.nextRunAt ? fmtDateTime(mediaRetentionPolicy.nextRunAt) : "a definir"
+                      }.`
+                    : "A política de backup de arquivos está desativada."}
+                </div>
+              ) : null}
             </div>
 
             <div className="chat-imageViewer__actions">
-              <button
-                className="chat-iconBtn"
-                onClick={() => setViewerZoom(imageViewerZoom - 0.2)}
-                title="Diminuir zoom"
-                disabled={imageViewerZoom <= 1}
-              >
-                <ZoomOutIcon />
-              </button>
-              <button className="chat-iconBtn" onClick={() => setViewerZoom(imageViewerZoom + 0.2)} title="Aumentar zoom">
-                <ZoomInIcon />
-              </button>
-              <button className="chat-iconBtn" onClick={resetImageViewerTransform} title="Resetar zoom">
-                <ResetZoomIcon />
-              </button>
-              <span className="chat-imageViewer__zoomLabel">{Math.round(imageViewerZoom * 100)}%</span>
+              {currentViewerItem?.attachmentUrl ? (
+                <button
+                  className="chat-iconBtn"
+                  onClick={() => void downloadAttachment(currentViewerItem)}
+                  title={currentViewerIsVideo ? "Baixar vídeo" : "Baixar mídia"}
+                >
+                  <DownloadIcon />
+                </button>
+              ) : null}
+              {currentViewerItem ? (
+                <button
+                  className="chat-iconBtn is-danger"
+                  onClick={() => void hideMessageForMe(currentViewerItem)}
+                  title="Apagar apenas do seu chat"
+                >
+                  <TrashIcon />
+                </button>
+              ) : null}
+              {!currentViewerIsVideo ? (
+                <>
+                  <button
+                    className="chat-iconBtn"
+                    onClick={() => setViewerZoom(imageViewerZoom - 0.2)}
+                    title="Diminuir zoom"
+                    disabled={imageViewerZoom <= 1}
+                  >
+                    <ZoomOutIcon />
+                  </button>
+                  <button className="chat-iconBtn" onClick={() => setViewerZoom(imageViewerZoom + 0.2)} title="Aumentar zoom">
+                    <ZoomInIcon />
+                  </button>
+                  <button className="chat-iconBtn" onClick={resetImageViewerTransform} title="Resetar zoom">
+                    <ResetZoomIcon />
+                  </button>
+                  <span className="chat-imageViewer__zoomLabel">{Math.round(imageViewerZoom * 100)}%</span>
+                </>
+              ) : null}
               <button className="chat-iconBtn" onClick={closeImageViewer} title="Fechar">
                 <CloseIcon />
               </button>
@@ -2979,7 +3556,7 @@ export function ChatPage() {
               className="chat-imageViewer__nav chat-imageViewer__nav--left"
               onClick={() => goToImage(-1)}
               disabled={!canViewPrev}
-              title="Imagem anterior"
+              title="Mídia anterior"
             >
               <ChevronLeftIcon />
             </button>
@@ -2989,13 +3566,13 @@ export function ChatPage() {
                 imageViewerDragging ? "is-dragging" : ""
               }`}
               onWheel={(e) => {
-                if (!currentViewerUrl) return;
+                if (!currentViewerUrl || currentViewerIsVideo) return;
                 e.preventDefault();
                 const delta = e.deltaY < 0 ? 0.2 : -0.2;
                 setViewerZoom(imageViewerZoom + delta);
               }}
               onMouseDown={(e) => {
-                if (imageViewerZoom <= 1) return;
+                if (imageViewerZoom <= 1 || currentViewerIsVideo) return;
                 e.preventDefault();
                 imageViewerDragRef.current = {
                   active: true,
@@ -3022,6 +3599,7 @@ export function ChatPage() {
                 setImageViewerDragging(false);
               }}
               onDoubleClick={() => {
+                if (currentViewerIsVideo) return;
                 if (imageViewerZoom > 1) {
                   resetImageViewerTransform();
                 } else {
@@ -3030,18 +3608,29 @@ export function ChatPage() {
               }}
             >
               {currentViewerUrl ? (
-                <img
-                  key={currentViewerItem?.id ?? currentViewerUrl}
-                  src={currentViewerUrl}
-                  alt={currentViewerItem?.attachmentName ?? "imagem"}
-                  className="chat-imageViewer__image"
-                  draggable={false}
-                  style={{
-                    transform: `translate(${imageViewerOffset.x}px, ${imageViewerOffset.y}px) scale(${imageViewerZoom})`,
-                  }}
-                />
+                currentViewerIsVideo ? (
+                  <video
+                    key={currentViewerItem?.id ?? currentViewerUrl}
+                    src={currentViewerUrl}
+                    className="chat-imageViewer__video"
+                    controls
+                    playsInline
+                    preload="metadata"
+                  />
+                ) : (
+                  <img
+                    key={currentViewerItem?.id ?? currentViewerUrl}
+                    src={currentViewerUrl}
+                    alt={normalizeAttachmentDisplayName(currentViewerItem?.attachmentName) || "imagem"}
+                    className="chat-imageViewer__image"
+                    draggable={false}
+                    style={{
+                      transform: `translate(${imageViewerOffset.x}px, ${imageViewerOffset.y}px) scale(${imageViewerZoom})`,
+                    }}
+                  />
+                )
               ) : (
-                <div className="chat-empty">Imagem indisponível.</div>
+                <div className="chat-empty">{currentViewerIsVideo ? "Vídeo indisponível." : "Imagem indisponível."}</div>
               )}
             </div>
 
@@ -3049,7 +3638,7 @@ export function ChatPage() {
               className="chat-imageViewer__nav chat-imageViewer__nav--right"
               onClick={() => goToImage(1)}
               disabled={!canViewNext}
-              title="Próxima imagem"
+              title="Próxima mídia"
             >
               <ChevronRightIcon />
             </button>
@@ -3075,8 +3664,12 @@ export function ChatPage() {
               <div className="chat-profileDrawer__body">
                 <div className="chat-contactCard">
                   <div className="chat-avatar chat-avatar--xl">
-                    {toAbsoluteUrl(profileData.avatarUrl) ? (
-                      <img src={toAbsoluteUrl(profileData.avatarUrl) ?? ""} alt={profileData.name} />
+                    {resolveAvatarUrl(profileData.avatarUrl) ? (
+                      <img
+                        src={resolveAvatarUrl(profileData.avatarUrl) ?? ""}
+                        alt={profileData.name}
+                        onError={() => markAvatarBroken(profileData.avatarUrl)}
+                      />
                     ) : (
                       <span>{profileData.name.slice(0, 1).toUpperCase()}</span>
                     )}
@@ -3103,7 +3696,9 @@ export function ChatPage() {
                       <button
                         className="chat-iconBtn chat-iconBtn--sm chat-contactInfoCopyBtn"
                         onClick={() => {
-                          if (profileData.email) copyText(profileData.email);
+                          if (profileData.email) {
+                            void copyText(profileData.email, "E-mail copiado");
+                          }
                         }}
                         title={profileData.email ? "Copiar e-mail" : "Sem e-mail para copiar"}
                         disabled={!profileData.email}
@@ -3134,10 +3729,10 @@ export function ChatPage() {
                         </div>
                         <div className="chat-favoriteCard__body">
                           {msg.body?.trim() ||
-                            (msg.contentType === "IMAGE"
-                              ? "Imagem"
+                            (isMediaAttachment(msg)
+                              ? mediaLabel(msg)
                               : msg.contentType === "FILE"
-                              ? msg.attachmentName || "Arquivo"
+                              ? normalizeAttachmentDisplayName(msg.attachmentName) || "Arquivo"
                               : "Mensagem")}
                         </div>
                       </button>
@@ -3177,25 +3772,55 @@ export function ChatPage() {
                           setProfileOpen(false);
                         }}
                       >
-                        <img src={toAbsoluteUrl(item.attachmentUrl) ?? ""} alt={item.attachmentName ?? "imagem"} />
+                        {isVideoAttachment(item) ? (
+                          <div className="chat-videoPreview">
+                            <video
+                              src={toAbsoluteUrl(item.attachmentUrl) ?? ""}
+                              className="chat-mediaThumb__video"
+                              preload="metadata"
+                              muted
+                              playsInline
+                            />
+                            <span className="chat-videoPreview__badge">Vídeo</span>
+                          </div>
+                        ) : (
+                          <img
+                            src={toAbsoluteUrl(item.attachmentUrl) ?? ""}
+                            alt={normalizeAttachmentDisplayName(item.attachmentName) || "imagem"}
+                          />
+                        )}
                       </button>
                     ))
                   ) : (
                     profileMediaItems.map((item) => (
                       <button
                         key={item.id}
-                        className="chat-fileCard chat-fileCard--btn"
+                        className={`chat-fileCard chat-fileCard--btn ${isPdfAttachment(item) ? "chat-fileCard--pdf" : ""}`}
                         onClick={() => {
                           void jumpToMessageById(item.id);
                           setProfileOpen(false);
                         }}
                       >
-                        <div className="chat-fileCard__icon">
-                          <FileIcon />
-                        </div>
-                        <div className="chat-fileCard__text">
-                          <div className="chat-fileCard__name">{item.attachmentName ?? "Arquivo"}</div>
-                          <div className="chat-fileCard__meta">{fmtDateTime(item.createdAt)}</div>
+                        {isPdfAttachment(item) ? (
+                          <div className="chat-fileCard__preview" aria-hidden="true">
+                            <iframe
+                              src={buildPdfPreviewUrl(item.attachmentUrl) ?? ""}
+                              title={normalizeAttachmentDisplayName(item.attachmentName) || "Pré-visualização do PDF"}
+                              loading="lazy"
+                              tabIndex={-1}
+                            />
+                          </div>
+                        ) : null}
+                        <div className="chat-fileCard__body">
+                          <div className="chat-fileCard__icon">
+                            <FileIcon />
+                          </div>
+                          <div className="chat-fileCard__text">
+                            <div className="chat-fileCard__name">
+                              {normalizeAttachmentDisplayName(item.attachmentName) || "Arquivo"}
+                            </div>
+                            <div className="chat-fileCard__meta">{fmtDateTime(item.createdAt)}</div>
+                          </div>
                         </div>
                       </button>
                     ))
@@ -3210,6 +3835,8 @@ export function ChatPage() {
           </div>
         </div>
       ) : null}
+
+      {toastMessage ? <div className="chat-toast">{toastMessage}</div> : null}
     </div>
   );
 }

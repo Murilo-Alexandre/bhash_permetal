@@ -32,12 +32,13 @@ function pickEnv(name: string, fallback?: string) {
 async function main() {
   // 1) AppConfig
   const primaryColor = pickEnv('SEED_PRIMARY_COLOR', '#001F3F')!;
+  const primaryTextColor = pickEnv('SEED_PRIMARY_TEXT_COLOR', '#F0F0F0')!;
   const logoUrl = pickEnv('SEED_LOGO_URL', '') || null;
 
   await prisma.appConfig.upsert({
     where: { id: 'default' },
-    update: { primaryColor, logoUrl: logoUrl ?? undefined },
-    create: { id: 'default', primaryColor, logoUrl: logoUrl ?? undefined },
+    update: { primaryColor, primaryTextColor, logoUrl: logoUrl ?? undefined },
+    create: { id: 'default', primaryColor, primaryTextColor, logoUrl: logoUrl ?? undefined },
   });
 
   // 2) SuperAdmin (sempre existe 1)

@@ -1,0 +1,2 @@
+ALTER TABLE "app_config"
+ADD COLUMN IF NOT EXISTS "mediaRetentionIntervalCount" INTEGER NOT NULL DEFAULT 1;

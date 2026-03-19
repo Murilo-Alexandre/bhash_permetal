@@ -12,6 +12,16 @@ enum MessageContentType {
   FILE
 }
 
+enum MediaRetentionInterval {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  QUARTERLY
+  SEMIANNUAL
+  YEARLY
+}
+
 model Company {
   id        String   @id @default(uuid())
   name      String   @unique
@@ -83,9 +93,21 @@ model AdminAccount {
 }
 
 model AppConfig {
-  id           String  @id
-  primaryColor String  @default("#001F3F")
-  logoUrl      String?
+  id                      String                 @id
+  primaryColor            String                 @default("#001F3F")
+  primaryTextColor        String                 @default("#F0F0F0")
+  logoUrl                 String?
+  mediaRetentionEnabled   Boolean                @default(false)
+  mediaRetentionInterval  MediaRetentionInterval @default(MONTHLY)
+  mediaRetentionIntervalCount Int                @default(1)
+  mediaRetentionRunHour   Int                    @default(0)
+  mediaRetentionRunMinute Int                    @default(0)
+  mediaRetentionShowToUsers Boolean              @default(false)
+  mediaRetentionNextRunAt DateTime?
+  mediaRetentionLastRunAt DateTime?
+  mediaRetentionLastMediaCount Int               @default(0)
+  mediaRetentionLastFileCount Int                @default(0)
+  mediaRetentionLastSummary String?
 
   @@map("app_config")
 }
