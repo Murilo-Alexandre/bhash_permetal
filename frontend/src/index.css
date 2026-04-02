@@ -4441,72 +4441,132 @@ button.chat-pickerQuickActions__action:not(:disabled):active {
   bottom: 28px;
   transform: translateX(-50%);
   z-index: 120;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   max-width: min(calc(100vw - 32px), 360px);
-  padding: 10px 16px;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--bhash-primary) 78%, white 22%);
-  background: color-mix(in srgb, var(--bhash-primary) 88%, black 12%);
-  color: var(--btn-fg);
-  font-size: 14px;
+  padding: 12px 16px;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--bg) 96%, rgba(0, 0, 0, 0.04));
+  color: var(--fg);
+  font-size: 13px;
   font-weight: 800;
-  line-height: 1.2;
-  text-align: center;
+  line-height: 1.15;
   pointer-events: none;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.18);
+}
+
+.chat-toast--success {
+  border-color: color-mix(in srgb, var(--bhash-primary) 34%, rgba(42, 180, 94, 0.42));
+  background: color-mix(in srgb, var(--bhash-primary) 12%, var(--bg) 88%);
+}
+
+.chat-toast__icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, #2ab45e 82%, var(--bhash-primary) 18%);
+  flex-shrink: 0;
+}
+
+.chat-toast__label {
+  min-width: 0;
 }
 
 .chat-deleteUndoToast {
   position: fixed;
   left: 50%;
-  bottom: 24px;
+  bottom: 96px;
   transform: translateX(-50%);
   z-index: 121;
-  width: min(calc(100vw - 28px), 460px);
-  border-radius: 24px;
-  background: rgba(249, 249, 249, 0.96);
-  color: #101010;
-  border: 1px solid rgba(16, 16, 16, 0.08);
-  box-shadow: 0 22px 44px rgba(0, 0, 0, 0.26);
+  width: min(calc(100vw - 28px), 380px);
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--bg) 97%, rgba(0, 0, 0, 0.04));
+  color: var(--fg);
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  box-shadow: 0 20px 42px rgba(0, 0, 0, 0.22);
   overflow: hidden;
 }
 
 .chat-deleteUndoToast__bar {
-  height: 4px;
-  background: rgba(16, 16, 16, 0.08);
+  height: 3px;
+  background: color-mix(in srgb, var(--border) 72%, transparent);
 }
 
 .chat-deleteUndoToast__barFill {
   height: 100%;
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--bhash-primary) 78%, white 22%),
-    var(--bhash-primary)
-  );
+  background: linear-gradient(90deg, color-mix(in srgb, var(--bhash-primary) 68%, white 32%), var(--bhash-primary));
   transition: width 80ms linear;
 }
 
 .chat-deleteUndoToast__content {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 14px 16px 15px;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.chat-deleteUndoToast__status {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.chat-deleteUndoToast__timerSpinner {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.chat-deleteUndoToast__spinner {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--bhash-primary);
+  animation: chat-spin 0.9s linear infinite;
+}
+
+.chat-deleteUndoToast__spinner svg {
+  width: 34px;
+  height: 34px;
 }
 
 .chat-deleteUndoToast__text {
-  flex: 1;
   min-width: 0;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 900;
-  line-height: 1.25;
+  line-height: 1.15;
+}
+
+.chat-deleteUndoToast__timerValue {
+  position: relative;
+  z-index: 1;
+  color: color-mix(in srgb, var(--bhash-primary) 84%, var(--fg) 16%);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+  pointer-events: none;
 }
 
 .chat-deleteUndoToast__undo {
   flex-shrink: 0;
-  border: 0;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: 999px;
-  padding: 10px 16px;
-  background: rgba(0, 0, 0, 0.46);
-  color: white;
-  font-size: 14px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--card-bg-strong) 88%, var(--bg) 12%);
+  color: var(--fg);
+  font-size: 12px;
   font-weight: 900;
   cursor: pointer;
   transition: transform 120ms ease, background 120ms ease;
@@ -4514,7 +4574,17 @@ button.chat-pickerQuickActions__action:not(:disabled):active {
 
 .chat-deleteUndoToast__undo:hover {
   transform: translateY(-1px);
-  background: rgba(0, 0, 0, 0.56);
+  background: color-mix(in srgb, var(--card-bg-strong) 78%, var(--bhash-primary) 22%);
+}
+
+@keyframes chat-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .chat-taskOverlay {
@@ -4632,16 +4702,20 @@ button.chat-pickerQuickActions__action:not(:disabled):active {
 
   .chat-deleteUndoToast {
     width: min(calc(100vw - 18px), 460px);
-    bottom: 14px;
+    bottom: 84px;
   }
 
   .chat-deleteUndoToast__content {
     flex-wrap: wrap;
-    padding: 12px 14px 13px;
+    padding: 12px 14px;
+  }
+
+  .chat-deleteUndoToast__status {
+    width: 100%;
   }
 
   .chat-deleteUndoToast__undo {
-    width: 100%;
+    width: auto;
   }
 }
 

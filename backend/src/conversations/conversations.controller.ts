@@ -112,6 +112,13 @@ export class ConversationsController {
     return result;
   }
 
+  @Delete(':id/broadcast')
+  async deleteBroadcastList(@Req() req: any, @Param('id') conversationId: string) {
+    const result = await this.conversations.deleteBroadcastList(req.user.sub, conversationId);
+    this.events.emitConversationsSync(req.user.sub, { conversationId, force: true });
+    return result;
+  }
+
   @Post(':id/avatar')
   @UseInterceptors(
     FileInterceptor('file', {

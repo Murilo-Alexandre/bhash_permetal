@@ -156,6 +156,16 @@ export class ConversationsService {
             },
           },
         },
+        {
+          kind: 'BROADCAST' as const,
+          states: {
+            some: {
+              userId,
+              hidden: false,
+              leftAt: { not: null },
+            },
+          },
+        },
       ],
     };
   }
@@ -1256,6 +1266,48 @@ export class ConversationsService {
     };
   }
 
+  async deleteBroadcastList(myId: string, conversationId: string) {
+    const conv = await this.assertCurrentParticipant(myId, conversationId);
+    if (conv.kind !== 'BROADCAST') {
+      throw new BadRequestException('Somente listas de transmissão podem ser excluídas');
+    }
+    if (conv.createdById !== myId) {
+      throw new ForbiddenException('Somente quem criou a lista pode excluí-la');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const now = new Date();
+      await Promise.all([
+        tx.conversation.update({
+          where: { id: conversationId },
+          data: { broadcastIncludeAllUsers: false },
+        }),
+        tx.conversationParticipant.deleteMany({
+          where: { conversationId, userId: myId },
+        }),
+        tx.conversationAutomaticRule.deleteMany({ where: { conversationId } }),
+        tx.conversationBroadcastTarget.deleteMany({ where: { conversationId } }),
+        tx.conversationBroadcastCompany.deleteMany({ where: { conversationId } }),
+        tx.conversationBroadcastDepartment.deleteMany({ where: { conversationId } }),
+        tx.conversationBroadcastExcludedUser.deleteMany({ where: { conversationId } }),
+        tx.conversationUserState.upsert({
+          where: { conversationId_userId: { conversationId, userId: myId } },
+          update: { hidden: false, leftAt: now, leftReason: 'GROUP_DELETED', lastReadAt: now },
+          create: { conversationId, userId: myId, hidden: false, leftAt: now, leftReason: 'GROUP_DELETED', lastReadAt: now },
+        }),
+      ]);
+    });
+
+    return {
+      ok: true,
+      conversationId,
+      conversation: await this.serializeConversationForUser(myId, conversationId, {
+        includeBroadcastAudienceDetails: true,
+        includeAvailableBroadcastUsers: true,
+      }),
+    };
+  }
+
   async getDetails(myId: string, conversationId: string) {
     const conv = await this.findAccessibleConversationForUser(myId, conversationId);
     if (conv.kind === 'BROADCAST' && conv.createdById !== myId) {
@@ -1621,6 +1673,9 @@ export class ConversationsService {
     const conv = await this.assertMember(myId, conversationId);
     if (conv.kind === 'GROUP' && this.isCurrentParticipant(myId, conv)) {
       throw new BadRequestException('Saia do grupo antes de remover ele dos seus chats');
+    }
+    if (conv.kind === 'BROADCAST' && this.isCurrentParticipant(myId, conv)) {
+      throw new BadRequestException('Exclua a lista antes de remover ela dos seus chats');
     }
 
     await this.markAsRead(myId, conversationId);

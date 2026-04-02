@@ -180,7 +180,7 @@ export class MessagesService {
     const state = conv.states?.[0] ?? null;
     const ok =
       participantIds.includes(userId) ||
-      (conv.kind === 'GROUP' && !!state?.leftAt && !state?.hidden);
+      ((conv.kind === 'GROUP' || conv.kind === 'BROADCAST') && !!state?.leftAt && !state?.hidden);
     if (!ok) throw new ForbiddenException('Você não participa dessa conversa');
 
     return conv;

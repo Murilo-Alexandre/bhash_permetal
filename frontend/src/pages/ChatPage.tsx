@@ -287,6 +287,19 @@ type PendingConversationClearBatch = {
   expiresAt: number;
 };
 
+type PendingBroadcastDeleteBatch = {
+  token: number;
+  conversationId: string;
+  expiresAt: number;
+};
+
+type ToastTone = "default" | "success";
+
+type ToastState = {
+  message: string;
+  tone?: ToastTone;
+};
+
 type ProfileResponse = {
   ok: true;
   user: UserProfile;
@@ -2154,6 +2167,10 @@ function conversationRankTimestamp(conv: ConversationListItem) {
   return Number.isFinite(ts) ? ts : 0;
 }
 
+function preservedConversationSortAt(conv?: ConversationListItem | null) {
+  return conv?.sortAt ?? conv?.updatedAt ?? conv?.lastMessage?.createdAt ?? conv?.createdAt ?? undefined;
+}
+
 function nextConversationSortAt(
   conv: ConversationListItem,
   msg: Message,
@@ -2252,6 +2269,11 @@ function conversationSummaryLine(conv?: ConversationListItem | null) {
     return countLabel;
   }
 
+  if (conv.isCurrentParticipant === false) {
+    if (conv.leftReason === "GROUP_DELETED") return "Lista excluída";
+    return "Lista inativa";
+  }
+
   const count = Math.max(
     Number(conv.targetCount ?? 0),
     conversationBroadcastTargets(conv).length,
@@ -2260,7 +2282,11 @@ function conversationSummaryLine(conv?: ConversationListItem | null) {
 }
 
 function inactiveGroupNotice(conv?: ConversationListItem | null) {
-  if (!conv || conversationKind(conv) !== "GROUP" || conv.isCurrentParticipant !== false) return null;
+  if (!conv || conv.isCurrentParticipant !== false) return null;
+  if (conversationKind(conv) === "BROADCAST") {
+    return "Esta lista foi excluída. O histórico continua visível, mas não é mais possível enviar novas mensagens.";
+  }
+  if (conversationKind(conv) !== "GROUP") return null;
   if (conv.leftReason === "GROUP_DELETED") {
     return "Este grupo foi excluído. O histórico continua visível, mas novas mensagens não existem mais.";
   }
@@ -2291,24 +2317,24 @@ function computeBroadcastEffectiveUsers(
   users: UserMini[],
   ownerId: string | null | undefined,
   explicitTargetIds: string[],
-  companyIds: string[],
-  departmentIds: string[],
+  automaticRules: AutomaticRuleItem[],
   excludedUserIds: string[],
   includeAllUsers: boolean
 ) {
   const out = new Map<string, UserMini>();
   const owner = String(ownerId ?? "").trim();
   const explicitSet = new Set(explicitTargetIds);
-  const companySet = new Set(companyIds);
-  const departmentSet = new Set(departmentIds);
   const excludedSet = new Set(excludedUserIds);
 
   for (const user of users) {
     if (user.id === owner) continue;
     const matchesRule =
       includeAllUsers ||
-      (user.company?.id ? companySet.has(user.company.id) : false) ||
-      (user.department?.id ? departmentSet.has(user.department.id) : false);
+      automaticRules.some((rule) => {
+        const companyOk = !rule.companyId || user.company?.id === rule.companyId;
+        const departmentOk = !rule.departmentId || user.department?.id === rule.departmentId;
+        return companyOk && departmentOk;
+      });
     if (explicitSet.has(user.id) || matchesRule) {
       out.set(user.id, user);
     }
@@ -2372,7 +2398,14 @@ function buildConversationDetailsFallback(conversation: ConversationListItem, us
   const effectiveTargets =
     conversation.effectiveBroadcastTargets && conversation.effectiveBroadcastTargets.length
       ? conversation.effectiveBroadcastTargets
-      : explicitTargets;
+      : computeBroadcastEffectiveUsers(
+          users,
+          conversation.createdById,
+          explicitTargets.map((user) => user.id),
+          conversation.automaticRules ?? [],
+          (conversation.broadcastExcludedUsers ?? []).map((user) => user.id),
+          !!conversation.broadcastIncludeAllUsers
+        );
   const effectiveTargetIds = new Set(effectiveTargets.map((user) => user.id));
   const ownerId = conversation.createdById ?? null;
   const availableUsers = users
@@ -2581,6 +2614,21 @@ function CheckCircleIcon() {
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
       <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
       <path d="M8.2 12.3 10.8 15l5.2-5.6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function SpinnerIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="2.2" opacity="0.22" />
+      <path
+        d="M12 4a8 8 0 0 1 8 8"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
@@ -3164,6 +3212,7 @@ export function ChatPage() {
   const [conversationClearPrompt, setConversationClearPrompt] = useState<ConversationClearPrompt | null>(null);
   const [pendingConversationHideBatch, setPendingConversationHideBatch] = useState<PendingConversationHideBatch | null>(null);
   const [pendingConversationClearBatch, setPendingConversationClearBatch] = useState<PendingConversationClearBatch | null>(null);
+  const [pendingBroadcastDeleteBatch, setPendingBroadcastDeleteBatch] = useState<PendingBroadcastDeleteBatch | null>(null);
   const [pendingConversationCountdownMs, setPendingConversationCountdownMs] = useState(0);
   const [reactionBarMsgId, setReactionBarMsgId] = useState<string | null>(null);
   const [reactionPickerMsgId, setReactionPickerMsgId] = useState<string | null>(null);
@@ -3180,7 +3229,7 @@ export function ChatPage() {
   const [avatarUploading, setAvatarUploading] = useState(false);
   const [avatarRemoving, setAvatarRemoving] = useState(false);
   const [brokenAvatarUrls, setBrokenAvatarUrls] = useState<Set<string>>(new Set());
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastState, setToastState] = useState<ToastState | null>(null);
   const [removalNoticesLoading, setRemovalNoticesLoading] = useState(false);
   const [removalNoticesProgress, setRemovalNoticesProgress] = useState(0);
 
@@ -3197,10 +3246,11 @@ export function ChatPage() {
   const [conversationDetailsSaving, setConversationDetailsSaving] = useState(false);
   const [conversationDetailsTitle, setConversationDetailsTitle] = useState("");
   const [conversationDetailsSelectedUserIds, setConversationDetailsSelectedUserIds] = useState<string[]>([]);
-  const [conversationDetailsSelectedCompanyIds, setConversationDetailsSelectedCompanyIds] = useState<string[]>([]);
-  const [conversationDetailsSelectedDepartmentIds, setConversationDetailsSelectedDepartmentIds] = useState<string[]>([]);
+  const [conversationDetailsAutomaticRules, setConversationDetailsAutomaticRules] = useState<AutomaticRuleItem[]>([]);
   const [conversationDetailsExcludedUserIds, setConversationDetailsExcludedUserIds] = useState<string[]>([]);
   const [conversationDetailsIncludeAllUsers, setConversationDetailsIncludeAllUsers] = useState(false);
+  const [conversationDetailsRuleManagerOpen, setConversationDetailsRuleManagerOpen] = useState(false);
+  const [broadcastDetailsEditorOpen, setBroadcastDetailsEditorOpen] = useState(false);
   const [conversationDetailsLegacyMode, setConversationDetailsLegacyMode] = useState(false);
   const [conversationAvatarUploading, setConversationAvatarUploading] = useState(false);
   const [conversationAvatarRemoving, setConversationAvatarRemoving] = useState(false);
@@ -3644,7 +3694,7 @@ export function ChatPage() {
     }
 
     if (!hadConversation) {
-      void loadConversations(currentConvId ?? undefined);
+        void loadConversations(currentConvId ?? undefined, { silent: true }).catch(() => {});
     }
   }
 
@@ -3749,15 +3799,35 @@ export function ChatPage() {
     });
   }
 
-  function showToast(message: string, durationMs = 1800) {
+  function showToast(message: string, durationMs = 1800, tone: ToastTone = "default") {
     if (toastTimerRef.current) {
       window.clearTimeout(toastTimerRef.current);
     }
-    setToastMessage(message);
+    setToastState({ message, tone });
     toastTimerRef.current = window.setTimeout(() => {
-      setToastMessage(null);
+      setToastState(null);
       toastTimerRef.current = null;
     }, durationMs);
+  }
+
+  function showSuccessToast(message: string, durationMs = 1800) {
+    showToast(message, durationMs, "success");
+  }
+
+  function pendingMessageDeleteLabel(count: number) {
+    return count === 1 ? "Apagando mensagem" : "Apagando mensagens";
+  }
+
+  function pendingConversationHideLabel(count: number) {
+    return count === 1 ? "Removendo chat" : "Removendo chats";
+  }
+
+  function successMessageDeleteLabel(count: number) {
+    return count === 1 ? "Mensagem apagada" : "Mensagens apagadas";
+  }
+
+  function successConversationHideLabel(count: number) {
+    return count === 1 ? "Chat removido" : "Chats removidos";
   }
 
   function clearPendingDeleteTimers() {
@@ -3818,14 +3888,11 @@ export function ChatPage() {
 
     try {
       await api.post("/messages/hide-many", { messageIds: batch.ids });
-      await loadConversations(batch.conversationId ?? activeConvIdRef.current ?? undefined);
-      showToast(
-        `${batch.ids.length} ${batch.ids.length === 1 ? "mensagem excluída" : "mensagens excluídas"}.`,
-        2000
-      );
+      await loadConversations(batch.conversationId ?? activeConvIdRef.current ?? undefined, { silent: true });
+      showSuccessToast(successMessageDeleteLabel(batch.ids.length), 2000);
     } catch {
       restorePendingDeleteBatch(batch);
-      await loadConversations(batch.conversationId ?? activeConvIdRef.current ?? undefined);
+      await loadConversations(batch.conversationId ?? activeConvIdRef.current ?? undefined, { silent: true }).catch(() => {});
       setSendErr("Não foi possível apagar as mensagens agora.");
     }
   }
@@ -3837,13 +3904,13 @@ export function ChatPage() {
     setPendingDeleteBatch(null);
     setPendingDeleteCountdownMs(0);
     restorePendingDeleteBatch(batch);
-    void loadConversations(batch.conversationId ?? activeConvIdRef.current ?? undefined);
+    void loadConversations(batch.conversationId ?? activeConvIdRef.current ?? undefined, { silent: true }).catch(() => {});
   }
 
   function queuePendingDelete(messageIds: string[]) {
     const ids = Array.from(new Set(messageIds));
     if (!ids.length) return;
-    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch || pendingBroadcastDeleteBatch) {
       showToast("Finalize a exclusão pendente ou desfaça antes de apagar mais mensagens.", 2200);
       return;
     }
@@ -3876,7 +3943,7 @@ export function ChatPage() {
   }
 
   function startMultiDeleteFromMessage(message: Message) {
-    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch || pendingBroadcastDeleteBatch) {
       showToast("Finalize a exclusão pendente ou desfaça antes de apagar mais mensagens.", 2200);
       return;
     }
@@ -3973,14 +4040,11 @@ export function ChatPage() {
 
     try {
       await Promise.all(batch.ids.map((conversationId) => api.delete(`/conversations/${conversationId}`)));
-      await loadConversations(activeConvIdRef.current ?? undefined);
-      showToast(
-        `${batch.ids.length} ${batch.ids.length === 1 ? "chat apagado" : "chats apagados"}.`,
-        2000
-      );
+      await loadConversations(activeConvIdRef.current ?? undefined, { silent: true });
+      showSuccessToast(successConversationHideLabel(batch.ids.length), 2000);
     } catch {
       restoreConversationUiSnapshot(batch.snapshot);
-      await loadConversations(activeConvIdRef.current ?? undefined);
+      await loadConversations(activeConvIdRef.current ?? undefined, { silent: true }).catch(() => {});
       setSendErr("Não foi possível remover os chats agora.");
     }
   }
@@ -3997,7 +4061,7 @@ export function ChatPage() {
   function queuePendingConversationHide(conversationIds: string[]) {
     const ids = Array.from(new Set(conversationIds));
     if (!ids.length) return;
-    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch || pendingBroadcastDeleteBatch) {
       showToast("Finalize a exclusão pendente ou desfaça antes de apagar mais chats.", 2200);
       return;
     }
@@ -4030,7 +4094,13 @@ export function ChatPage() {
   }
 
   function startConversationRemovalSelection(conversationId: string) {
-    if (multiDeleteMode || pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+    if (
+      multiDeleteMode ||
+      pendingDeleteBatch ||
+      pendingConversationHideBatch ||
+      pendingConversationClearBatch ||
+      pendingBroadcastDeleteBatch
+    ) {
       showToast("Finalize a exclusão pendente ou desfaça antes de apagar mais chats.", 2200);
       return;
     }
@@ -4079,16 +4149,19 @@ export function ChatPage() {
       } else {
         await api.post(`/conversations/${batch.conversationId}/clear`);
       }
-      await loadConversations(activeConvIdRef.current ?? undefined);
-      showToast(
-        batch.keepFavorites
-          ? "Conversa limpa, favoritas mantidas."
-          : "Conversa limpa para você.",
-        2000
+      const preservedSortAt = preservedConversationSortAt(
+        batch.snapshot.conversations.find((conv) => conv.id === batch.conversationId) ?? null
       );
+      await loadConversations(activeConvIdRef.current ?? undefined, {
+        silent: true,
+        preserveSort: preservedSortAt
+          ? { conversationId: batch.conversationId, sortAt: preservedSortAt }
+          : undefined,
+      });
+      showSuccessToast("Conversa limpa", 2000);
     } catch {
       restoreConversationUiSnapshot(batch.snapshot);
-      await loadConversations(activeConvIdRef.current ?? undefined);
+      await loadConversations(activeConvIdRef.current ?? undefined, { silent: true }).catch(() => {});
       setSendErr("Não foi possível limpar a conversa agora.");
     }
   }
@@ -4102,6 +4175,57 @@ export function ChatPage() {
     restoreConversationUiSnapshot(batch.snapshot);
   }
 
+  async function finalizePendingBroadcastDelete(batch: PendingBroadcastDeleteBatch) {
+    clearPendingConversationTimers();
+    setPendingBroadcastDeleteBatch((current) => (current?.token === batch.token ? null : current));
+    setPendingConversationCountdownMs(0);
+
+    try {
+      const res = await api.delete<ConversationDetailsResponse>(`/conversations/${batch.conversationId}/broadcast`);
+      const updatedConversation = res.data.conversation;
+      populateConversationDetailsForm(updatedConversation);
+      applyConversationUpdateLocally(updatedConversation);
+      setBroadcastDetailsEditorOpen(false);
+      await loadConversations(activeConvIdRef.current ?? undefined, { silent: true }).catch(() => {});
+      showSuccessToast("Lista excluída", 2000);
+    } catch (e: any) {
+      setConversationDetailsError(e?.response?.data?.message ?? "Não foi possível excluir a lista.");
+    }
+  }
+
+  function undoPendingBroadcastDelete() {
+    if (!pendingBroadcastDeleteBatch) return;
+    clearPendingConversationTimers();
+    setPendingBroadcastDeleteBatch(null);
+    setPendingConversationCountdownMs(0);
+  }
+
+  function queuePendingBroadcastDelete(conversation: ConversationListItem) {
+    if (!conversation?.id) return;
+    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch || pendingBroadcastDeleteBatch) {
+      showToast("Finalize a exclusão pendente ou desfaça antes de excluir outra lista.", 2200);
+      return;
+    }
+
+    const batch: PendingBroadcastDeleteBatch = {
+      token: Date.now(),
+      conversationId: conversation.id,
+      expiresAt: Date.now() + 5000,
+    };
+
+    setConversationMenuId(null);
+    setConversationDetailsError(null);
+    clearPendingConversationTimers();
+    setPendingBroadcastDeleteBatch(batch);
+    setPendingConversationCountdownMs(5000);
+    pendingConversationCountdownTimerRef.current = window.setInterval(() => {
+      setPendingConversationCountdownMs(Math.max(0, batch.expiresAt - Date.now()));
+    }, 100);
+    pendingConversationFinalizeTimerRef.current = window.setTimeout(() => {
+      void finalizePendingBroadcastDelete(batch);
+    }, 5000);
+  }
+
   function queuePendingConversationClear(
     conversationId: string,
     conversationName: string,
@@ -4111,7 +4235,7 @@ export function ChatPage() {
     favoriteIds: string[],
     keepFavorites: boolean
   ) {
-    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch || pendingBroadcastDeleteBatch) {
       showToast("Finalize a exclusão pendente ou desfaça antes de limpar outra conversa.", 2200);
       return;
     }
@@ -4182,7 +4306,14 @@ export function ChatPage() {
   }
 
   async function requestClearConversation(conversationId: string, conversationName: string) {
-    if (multiDeleteMode || conversationSelectMode || pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+    if (
+      multiDeleteMode ||
+      conversationSelectMode ||
+      pendingDeleteBatch ||
+      pendingConversationHideBatch ||
+      pendingConversationClearBatch ||
+      pendingBroadcastDeleteBatch
+    ) {
       showToast("Finalize a exclusão pendente ou desfaça antes de limpar outra conversa.", 2200);
       return;
     }
@@ -4427,7 +4558,7 @@ export function ChatPage() {
 
   async function loadConversations(
     selectConversationId?: string,
-    options?: { silent?: boolean }
+    options?: { silent?: boolean; preserveSort?: { conversationId: string; sortAt?: string } }
   ) {
     const silent = !!options?.silent;
     if (!silent) {
@@ -4436,9 +4567,14 @@ export function ChatPage() {
     }
     try {
       const res = await api.get<ConversationsResponse>("/conversations");
+      const preserveSort = options?.preserveSort;
       const items = sortConversationItems(
         applyLocalReadMarkersToConversations(
-          res.data.items ?? [],
+          (res.data.items ?? []).map((item) =>
+            preserveSort?.sortAt && item.id === preserveSort.conversationId
+              ? { ...item, sortAt: preserveSort.sortAt }
+              : item
+          ),
           conversationReadMarkersRef.current
         )
       );
@@ -4780,9 +4916,16 @@ export function ChatPage() {
     setConversationDetails(nextConversation);
     setConversationDetailsTitle(nextConversation.rawTitle?.trim() || nextConversation.title?.trim() || "");
     setConversationDetailsSelectedUserIds((nextConversation.broadcastTargets ?? []).map((user) => user.id));
-    setConversationDetailsSelectedCompanyIds((nextConversation.broadcastTargetCompanies ?? []).map((item) => item.id));
-    setConversationDetailsSelectedDepartmentIds(
-      (nextConversation.broadcastTargetDepartments ?? []).map((item) => item.id)
+    setConversationDetailsAutomaticRules(
+      dedupeAutomaticRules(
+        (nextConversation.automaticRules ?? []).map((rule) => ({
+          id: rule.id || automaticRuleKey(rule.companyId ?? null, rule.departmentId ?? null),
+          companyId: rule.companyId ?? rule.company?.id ?? null,
+          departmentId: rule.departmentId ?? rule.department?.id ?? null,
+          company: rule.company ?? null,
+          department: rule.department ?? null,
+        }))
+      )
     );
     setConversationDetailsExcludedUserIds((nextConversation.broadcastExcludedUsers ?? []).map((user) => user.id));
     setConversationDetailsIncludeAllUsers(!!nextConversation.broadcastIncludeAllUsers);
@@ -4798,6 +4941,8 @@ export function ChatPage() {
     setConversationDetailsError(null);
     setConversationDetailsLegacyMode(false);
     setConversationDetailsRemovingChat(false);
+    setConversationDetailsRuleManagerOpen(false);
+    setBroadcastDetailsEditorOpen(false);
     setGroupDetailsActionKey(null);
     populateConversationDetailsForm(fallbackConversation);
     if (conversationKind(target) === "BROADCAST" && users.length === 0) {
@@ -4822,18 +4967,6 @@ export function ChatPage() {
     }
   }
 
-  function toggleConversationDetailsCompanySelection(companyId: string) {
-    setConversationDetailsSelectedCompanyIds((prev) =>
-      prev.includes(companyId) ? prev.filter((id) => id !== companyId) : [...prev, companyId]
-    );
-  }
-
-  function toggleConversationDetailsDepartmentSelection(departmentId: string) {
-    setConversationDetailsSelectedDepartmentIds((prev) =>
-      prev.includes(departmentId) ? prev.filter((id) => id !== departmentId) : [...prev, departmentId]
-    );
-  }
-
   function addUserToConversationDetails(userId: string) {
     setConversationDetailsSelectedUserIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
     setConversationDetailsExcludedUserIds((prev) => prev.filter((id) => id !== userId));
@@ -4842,6 +4975,41 @@ export function ChatPage() {
   function removeUserFromConversationDetails(userId: string) {
     setConversationDetailsSelectedUserIds((prev) => prev.filter((id) => id !== userId));
     setConversationDetailsExcludedUserIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+  }
+
+  function openConversationDetailsRuleManager() {
+    if (!conversationDetailsAutomaticRules.length) {
+      setConversationDetailsAutomaticRules([
+        {
+          id: randomId(),
+          companyId: null,
+          departmentId: null,
+          company: null,
+          department: null,
+        },
+      ]);
+    }
+    setConversationDetailsRuleManagerOpen(true);
+  }
+
+  function addEmptyConversationDetailsRule() {
+    setConversationDetailsAutomaticRules((prev) => [
+      ...prev,
+      { id: randomId(), companyId: null, departmentId: null, company: null, department: null },
+    ]);
+  }
+
+  function updateConversationDetailsAutomaticRule(
+    ruleId: string,
+    patch: Partial<Pick<AutomaticRuleItem, "companyId" | "departmentId" | "company" | "department">>
+  ) {
+    setConversationDetailsAutomaticRules((prev) =>
+      prev.map((rule) => (rule.id === ruleId ? { ...rule, ...patch } : rule))
+    );
+  }
+
+  function removeConversationDetailsAutomaticRule(ruleId: string) {
+    setConversationDetailsAutomaticRules((prev) => prev.filter((rule) => rule.id !== ruleId));
   }
 
   async function saveBroadcastConversationDetails() {
@@ -4858,8 +5026,10 @@ export function ChatPage() {
       const res = await api.patch<ConversationDetailsResponse>(`/conversations/${conversation.id}/broadcast`, {
         title: conversationDetailsTitle,
         targetUserIds: conversationDetailsSelectedUserIds,
-        companyIds: conversationDetailsSelectedCompanyIds,
-        departmentIds: conversationDetailsSelectedDepartmentIds,
+        automaticRules: dedupeAutomaticRules(conversationDetailsAutomaticRules).map((rule) => ({
+          companyId: rule.companyId ?? null,
+          departmentId: rule.departmentId ?? null,
+        })),
         excludedUserIds: conversationDetailsExcludedUserIds,
         includeAllUsers: conversationDetailsIncludeAllUsers,
       });
@@ -4872,6 +5042,11 @@ export function ChatPage() {
     } finally {
       setConversationDetailsSaving(false);
     }
+  }
+
+  async function deleteBroadcastFromDetails(conversation: ConversationListItem) {
+    if (!conversation?.id) return;
+    queuePendingBroadcastDelete(conversation);
   }
 
   async function startDirect(otherUserId: string) {
@@ -5044,7 +5219,11 @@ export function ChatPage() {
       setConversationDetailsError("Saia do grupo antes de remover ele dos seus chats.");
       return;
     }
-    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+    if (conversationKind(target) === "BROADCAST" && target.isCurrentParticipant !== false) {
+      setConversationDetailsError("Exclua a lista antes de remover ela dos seus chats.");
+      return;
+    }
+    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch || pendingBroadcastDeleteBatch) {
       showToast("Finalize a exclusão pendente ou desfaça antes de apagar mais chats.", 2200);
       return;
     }
@@ -5512,6 +5691,10 @@ export function ChatPage() {
       setSendErr("Saia do grupo antes de remover ele dos seus chats.");
       return;
     }
+    if (conversationKind(conversation) === "BROADCAST" && conversation?.isCurrentParticipant !== false) {
+      setSendErr("Exclua a lista antes de remover ela dos seus chats.");
+      return;
+    }
     startConversationRemovalSelection(targetId);
   }
 
@@ -5819,8 +6002,19 @@ export function ChatPage() {
       pickerAutomaticAudienceCandidates,
       me?.id ?? null,
       [],
-      pickerFilterCompanyIds,
-      pickerFilterDepartmentIds,
+      dedupeAutomaticRules(
+        (pickerFilterCompanyIds.length ? pickerFilterCompanyIds : [null]).flatMap((companyId) =>
+          (pickerFilterDepartmentIds.length ? pickerFilterDepartmentIds : [null])
+            .filter((departmentId) => !!companyId || !!departmentId)
+            .map((departmentId) => ({
+              id: automaticRuleKey(companyId, departmentId),
+              companyId,
+              departmentId,
+              company: null,
+              department: null,
+            }))
+        )
+      ),
       [],
       !pickerFilterCompanyIds.length && !pickerFilterDepartmentIds.length && !userSearch.trim()
     );
@@ -6094,8 +6288,7 @@ export function ChatPage() {
       users,
       conversationDetails.createdById,
       conversationDetailsSelectedUserIds,
-      conversationDetailsSelectedCompanyIds,
-      conversationDetailsSelectedDepartmentIds,
+      dedupeAutomaticRules(conversationDetailsAutomaticRules),
       conversationDetailsExcludedUserIds,
       conversationDetailsIncludeAllUsers
     );
@@ -6103,8 +6296,7 @@ export function ChatPage() {
     users,
     conversationDetails,
     conversationDetailsSelectedUserIds,
-    conversationDetailsSelectedCompanyIds,
-    conversationDetailsSelectedDepartmentIds,
+    conversationDetailsAutomaticRules,
     conversationDetailsExcludedUserIds,
     conversationDetailsIncludeAllUsers,
   ]);
@@ -6118,6 +6310,15 @@ export function ChatPage() {
       .filter((user) => user.id !== ownerId && !effectiveIds.has(user.id))
       .sort((a, b) => compareAlpha(a.name || a.username, b.name || b.username));
   }, [users, conversationDetails, conversationDetailsEffectiveTargets]);
+  const conversationDetailsAutomaticRuleLabels = useMemo(
+    () =>
+      dedupeAutomaticRules(conversationDetailsAutomaticRules).map((rule) => {
+        const companyName = rule.company?.name ?? "Todas as empresas";
+        const departmentName = rule.department?.name ?? "Todos os setores";
+        return `${companyName} + ${departmentName}`;
+      }),
+    [conversationDetailsAutomaticRules]
+  );
 
   const favoriteMessages = useMemo(() => {
     return messages.filter((m) => m.isFavorited);
@@ -6139,6 +6340,54 @@ export function ChatPage() {
   const allMessagesSelected =
     selectableMessageIds.length > 0 && selectedMessageIds.length === selectableMessageIds.length;
   const pendingDeleteCountdownSeconds = Math.max(0, Math.ceil(pendingDeleteCountdownMs / 1000));
+  const pendingActionToast = useMemo(() => {
+    if (pendingDeleteBatch) {
+      return {
+        key: `message-delete:${pendingDeleteBatch.token}`,
+        label: pendingMessageDeleteLabel(pendingDeleteBatch.ids.length),
+        seconds: pendingDeleteCountdownSeconds,
+        progress: Math.max(0, Math.min(100, (pendingDeleteCountdownMs / 5000) * 100)),
+        onUndo: undoPendingDeleteBatch,
+      };
+    }
+    if (pendingConversationHideBatch) {
+      return {
+        key: `conversation-hide:${pendingConversationHideBatch.token}`,
+        label: pendingConversationHideLabel(pendingConversationHideBatch.ids.length),
+        seconds: pendingConversationCountdownSeconds,
+        progress: Math.max(0, Math.min(100, (pendingConversationCountdownMs / 5000) * 100)),
+        onUndo: undoPendingConversationHide,
+      };
+    }
+    if (pendingConversationClearBatch) {
+      return {
+        key: `conversation-clear:${pendingConversationClearBatch.token}`,
+        label: "Limpando conversa",
+        seconds: pendingConversationCountdownSeconds,
+        progress: Math.max(0, Math.min(100, (pendingConversationCountdownMs / 5000) * 100)),
+        onUndo: undoPendingConversationClear,
+      };
+    }
+    if (pendingBroadcastDeleteBatch) {
+      return {
+        key: `broadcast-delete:${pendingBroadcastDeleteBatch.token}`,
+        label: "Excluindo lista",
+        seconds: pendingConversationCountdownSeconds,
+        progress: Math.max(0, Math.min(100, (pendingConversationCountdownMs / 5000) * 100)),
+        onUndo: undoPendingBroadcastDelete,
+      };
+    }
+    return null;
+  }, [
+    pendingBroadcastDeleteBatch,
+    pendingConversationClearBatch,
+    pendingConversationCountdownMs,
+    pendingConversationCountdownSeconds,
+    pendingConversationHideBatch,
+    pendingDeleteBatch,
+    pendingDeleteCountdownMs,
+    pendingDeleteCountdownSeconds,
+  ]);
 
   const currentViewerItem = imageViewerItems[imageViewerIndex] ?? null;
   const currentViewerUrl = toAbsoluteUrl(currentViewerItem?.attachmentUrl);
@@ -6148,7 +6397,11 @@ export function ChatPage() {
   const showMobileSidebar = !isMobileLayout || !activeConv;
   const showMobileMain = !isMobileLayout || !!activeConv;
   const canSendInActiveConversation =
-    !!activeConv && !(conversationKind(activeConv) === "GROUP" && activeConv.isCurrentParticipant === false);
+    !!activeConv &&
+    !(
+      (conversationKind(activeConv) === "GROUP" || conversationKind(activeConv) === "BROADCAST") &&
+      activeConv.isCurrentParticipant === false
+    );
   const conversationMenuConversation = useMemo(
     () => conversations.find((conv) => conv.id === conversationMenuId) ?? null,
     [conversations, conversationMenuId]
@@ -6293,19 +6546,19 @@ export function ChatPage() {
 
     s.on("conversations:sync", (payload?: { conversationId?: string | null; force?: boolean }) => {
       if (payload?.force) {
-        void loadConversations(activeConvIdRef.current ?? undefined);
+        void loadConversations(activeConvIdRef.current ?? undefined, { silent: true }).catch(() => {});
         return;
       }
 
       const conversationId = payload?.conversationId ?? null;
       if (!conversationId) {
-        void loadConversations(activeConvIdRef.current ?? undefined);
+        void loadConversations(activeConvIdRef.current ?? undefined, { silent: true }).catch(() => {});
         return;
       }
 
       const hasConversation = conversationsRef.current.some((conv) => conv.id === conversationId);
       if (!hasConversation) {
-        void loadConversations(activeConvIdRef.current ?? undefined);
+        void loadConversations(activeConvIdRef.current ?? undefined, { silent: true }).catch(() => {});
       }
     });
 
@@ -8109,8 +8362,21 @@ export function ChatPage() {
                   <span>Sair do grupo</span>
                 </button>
               ) : null}
-              {conversationKind(conversationMenuConversation) !== "GROUP" ||
-              conversationMenuConversation.isCurrentParticipant === false ? (
+              {conversationKind(conversationMenuConversation) === "BROADCAST" &&
+              conversationMenuConversation.isCurrentParticipant !== false ? (
+                <button
+                  className="chat-msgMenu__item chat-msgMenu__item--danger"
+                  onClick={() => {
+                    closeConversationMenu();
+                    void deleteBroadcastFromDetails(conversationMenuConversation);
+                  }}
+                >
+                  <TrashIcon />
+                  <span>Excluir lista</span>
+                </button>
+              ) : null}
+              {(conversationKind(conversationMenuConversation) === "DIRECT" ||
+                conversationMenuConversation.isCurrentParticipant === false) ? (
                 <button
                   className="chat-msgMenu__item chat-msgMenu__item--danger"
                   onClick={() => {
@@ -9131,16 +9397,7 @@ export function ChatPage() {
                     busyLabel={conversationDetailsCanManageAvatar ? detailsAvatarBusyLabel : null}
                   />
 
-                  {conversationDetailsKind === "BROADCAST" && conversationDetailsCanEditBroadcast ? (
-                    <input
-                      className="chat-input chat-input--detailsTitle"
-                      value={conversationDetailsTitle}
-                      onChange={(e) => setConversationDetailsTitle(e.target.value)}
-                      maxLength={80}
-                    />
-                  ) : (
-                    <div className="chat-contactCard__name">{conversationDisplayName(conversationDetails)}</div>
-                  )}
+                  <div className="chat-contactCard__name">{conversationDisplayName(conversationDetails)}</div>
 
                   <div className="chat-contactCard__sub">{conversationSummaryLine(conversationDetails)}</div>
                 </div>
@@ -9300,9 +9557,82 @@ export function ChatPage() {
                   </>
                 ) : (
                   <>
-                    {conversationDetailsCanEditBroadcast && !conversationDetailsLegacyMode ? (
+                    {conversationDetails.isCurrentParticipant !== false ? (
+                      conversationDetailsCanEditBroadcast ? (
+                        <div className="chat-groupHeroActions">
+                          <button
+                            className="chat-groupHeroAction"
+                            onClick={() => setBroadcastDetailsEditorOpen((prev) => !prev)}
+                            disabled={conversationDetailsLegacyMode}
+                            title={
+                              conversationDetailsLegacyMode
+                                ? "Atualize o servidor para editar essa lista."
+                                : "Adicionar ou ajustar quem recebe essa lista"
+                            }
+                          >
+                            <span className="chat-groupHeroAction__icon">
+                              <UserAddIcon />
+                            </span>
+                            <span className="chat-groupHeroAction__label">
+                              {broadcastDetailsEditorOpen ? "Fechar edição" : "Adicionar"}
+                            </span>
+                          </button>
+                        </div>
+                      ) : null
+                    ) : (
+                      <div className="chat-groupInactiveNotice">{inactiveGroupNotice(conversationDetails)}</div>
+                    )}
+
+                    <div className="chat-sectionTitle">Destinatários</div>
+                    <div className="chat-groupParticipantsList">
+                      {conversationDetailsEffectiveTargets.length ? (
+                        conversationDetailsEffectiveTargets.map((user) => {
+                          const userAvatarUrl = resolveAvatarUrl(user.avatarUrl);
+                          const removable =
+                            broadcastDetailsEditorOpen &&
+                            conversationDetailsCanEditBroadcast &&
+                            !conversationDetailsLegacyMode;
+                          return (
+                            <div key={user.id} className="chat-groupParticipantRow">
+                              <div className="chat-avatar chat-avatar--md chat-groupParticipantRow__avatar">
+                                {userAvatarUrl ? (
+                                  <img
+                                    src={userAvatarUrl}
+                                    alt={user.name}
+                                    onError={() => markAvatarBroken(user.avatarUrl)}
+                                  />
+                                ) : (
+                                  <span>{(user.name || user.username || "U").slice(0, 1).toUpperCase()}</span>
+                                )}
+                              </div>
+
+                              <div className="chat-groupParticipantRow__main">
+                                <div className="chat-groupParticipantRow__name">{user.name}</div>
+                                <div className="chat-groupParticipantRow__sub">{user.email || user.username}</div>
+                              </div>
+
+                              {removable ? (
+                                <div className="chat-groupParticipantRow__side">
+                                  <button
+                                    className="chat-groupParticipantMenuBtn"
+                                    onClick={() => removeUserFromConversationDetails(user.id)}
+                                    title="Remover da lista"
+                                  >
+                                    <CloseIcon />
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <div className="chat-empty">Ninguém está recebendo essa lista agora.</div>
+                      )}
+                    </div>
+
+                    {conversationDetailsCanEditBroadcast && conversationDetails.isCurrentParticipant !== false ? (
                       <>
-                        <div className="chat-sectionTitle">Regras automáticas da lista</div>
+                        <div className="chat-sectionTitle">Inclusão automática</div>
                         <div className="chat-broadcastRules chat-broadcastRules--drawer">
                           <label className="chat-broadcastRules__allToggle">
                             <input
@@ -9310,107 +9640,137 @@ export function ChatPage() {
                               checked={conversationDetailsIncludeAllUsers}
                               onChange={(e) => setConversationDetailsIncludeAllUsers(e.target.checked)}
                             />
-                            <span>Incluir automaticamente todos os usuários novos e atuais</span>
+                            <span>Incluir novos usuários</span>
                           </label>
 
-                          <div className="chat-broadcastRules__group">
-                            <div className="chat-broadcastRules__label">Empresas automáticas</div>
-                            <div className="chat-broadcastRules__chips">
-                              {companyRuleOptions.map((item) => (
-                                <button
-                                  key={item.id}
-                                  type="button"
-                                  className={`chat-broadcastChip ${
-                                    conversationDetailsSelectedCompanyIds.includes(item.id) ? "is-selected" : ""
-                                  }`}
-                                  onClick={() => toggleConversationDetailsCompanySelection(item.id)}
-                                >
-                                  {item.name}
-                                </button>
-                              ))}
+                          <div className="chat-note">
+                            {conversationDetailsIncludeAllUsers
+                              ? "Todo usuário novo criado no sistema entra automaticamente nesta lista."
+                              : conversationDetailsAutomaticRuleLabels.length
+                              ? `Regras ativas: ${conversationDetailsAutomaticRuleLabels.join(" • ")}.`
+                              : "Nenhuma regra automática salva. Se ligar essa opção sem regra, a lista passa a aceitar todos os usuários novos."}
+                          </div>
+
+                          {conversationDetailsLegacyMode ? (
+                            <div className="chat-note">
+                              Atualize o servidor para editar as regras automáticas desta lista.
                             </div>
-                          </div>
-
-                          <div className="chat-broadcastRules__group">
-                            <div className="chat-broadcastRules__label">Setores automáticos</div>
-                            <div className="chat-broadcastRules__chips">
-                              {departmentRuleOptions.map((item) => (
-                                <button
-                                  key={item.id}
-                                  type="button"
-                                  className={`chat-broadcastChip ${
-                                    conversationDetailsSelectedDepartmentIds.includes(item.id) ? "is-selected" : ""
-                                  }`}
-                                  onClick={() => toggleConversationDetailsDepartmentSelection(item.id)}
-                                >
-                                  {item.name}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-                      </>
-                    ) : null}
-
-                    <div className="chat-sectionTitle">Quem recebe</div>
-                    <div className="chat-detailsList">
-                      {conversationDetailsEffectiveTargets.map((user) => (
-                        <div key={user.id} className="chat-detailsList__row">
-                          <div className="chat-detailsList__main">
-                            <strong>{user.name}</strong>
-                            <span>{user.email || user.username}</span>
-                          </div>
-                          {conversationDetailsCanEditBroadcast && !conversationDetailsLegacyMode ? (
-                            <button
-                              className="chat-iconBtn chat-iconBtn--sm is-danger"
-                              onClick={() => removeUserFromConversationDetails(user.id)}
-                              title="Remover da lista"
-                            >
-                              <CloseIcon />
-                            </button>
-                          ) : null}
-                        </div>
-                      ))}
-                      {!conversationDetailsEffectiveTargets.length ? (
-                        <div className="chat-empty">Ninguém está recebendo essa lista agora.</div>
-                      ) : null}
-                    </div>
-
-                    {conversationDetailsCanEditBroadcast && !conversationDetailsLegacyMode ? (
-                      <>
-                        <div className="chat-sectionTitle">Quem está fora da lista</div>
-                        <div className="chat-detailsList">
-                          {conversationDetailsAvailableTargets.map((user) => (
-                            <div key={user.id} className="chat-detailsList__row">
-                              <div className="chat-detailsList__main">
-                                <strong>{user.name}</strong>
-                                <span>{user.email || user.username}</span>
-                              </div>
+                          ) : (
+                            <div className="chat-detailsActions">
                               <button
-                                className="chat-iconBtn chat-iconBtn--sm"
-                                onClick={() => addUserToConversationDetails(user.id)}
-                                title="Adicionar à lista"
+                                type="button"
+                                className="chat-groupHeroAction"
+                                onClick={openConversationDetailsRuleManager}
                               >
-                                <PlusIcon />
+                                <span className="chat-groupHeroAction__icon">
+                                  <GearIcon />
+                                </span>
+                                <span className="chat-groupHeroAction__label">Configurar regras</span>
                               </button>
                             </div>
-                          ))}
-                          {!conversationDetailsAvailableTargets.length ? (
-                            <div className="chat-empty">Todos os usuários já estão cobertos por essa lista.</div>
+                          )}
+
+                          {conversationDetailsAutomaticRuleLabels.length ? (
+                            <div className="chat-broadcastRules__chips">
+                              {conversationDetailsAutomaticRuleLabels.map((label) => (
+                                <span key={label} className="chat-broadcastChip is-selected">
+                                  {label}
+                                </span>
+                              ))}
+                            </div>
                           ) : null}
                         </div>
 
-                        <div className="chat-detailsActions">
-                          <button
-                            className="chat-primaryBtn"
-                            onClick={() => void saveBroadcastConversationDetails()}
-                            disabled={conversationDetailsSaving}
-                          >
-                            {conversationDetailsSaving ? "Salvando..." : "Salvar lista"}
-                          </button>
-                        </div>
+                        {broadcastDetailsEditorOpen && !conversationDetailsLegacyMode ? (
+                          <>
+                            <div className="chat-sectionTitle">Adicionar pessoas</div>
+                            <div className="chat-groupParticipantsList">
+                              {conversationDetailsAvailableTargets.length ? (
+                                conversationDetailsAvailableTargets.map((user) => {
+                                  const userAvatarUrl = resolveAvatarUrl(user.avatarUrl);
+                                  return (
+                                    <div key={user.id} className="chat-groupParticipantRow">
+                                      <div className="chat-avatar chat-avatar--md chat-groupParticipantRow__avatar">
+                                        {userAvatarUrl ? (
+                                          <img
+                                            src={userAvatarUrl}
+                                            alt={user.name}
+                                            onError={() => markAvatarBroken(user.avatarUrl)}
+                                          />
+                                        ) : (
+                                          <span>{(user.name || user.username || "U").slice(0, 1).toUpperCase()}</span>
+                                        )}
+                                      </div>
+
+                                      <div className="chat-groupParticipantRow__main">
+                                        <div className="chat-groupParticipantRow__name">{user.name}</div>
+                                        <div className="chat-groupParticipantRow__sub">{user.email || user.username}</div>
+                                      </div>
+
+                                      <div className="chat-groupParticipantRow__side">
+                                        <button
+                                          className="chat-groupParticipantMenuBtn"
+                                          onClick={() => addUserToConversationDetails(user.id)}
+                                          title="Adicionar à lista"
+                                        >
+                                          <PlusIcon />
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })
+                              ) : (
+                                <div className="chat-empty">Todos os usuários já estão cobertos por essa lista.</div>
+                              )}
+                            </div>
+
+                            <div className="chat-detailsActions">
+                              <button
+                                className="chat-primaryBtn"
+                                onClick={() => void saveBroadcastConversationDetails()}
+                                disabled={conversationDetailsSaving}
+                              >
+                                {conversationDetailsSaving ? "Salvando..." : "Salvar lista"}
+                              </button>
+                            </div>
+                          </>
+                        ) : null}
                       </>
                     ) : null}
+
+                    <div className="chat-groupSettingsList">
+                      <button
+                        className="chat-groupSettingsAction"
+                        onClick={() => void clearConversation(conversationDetails.id, conversationDisplayName(conversationDetails))}
+                      >
+                        <ClearConversationIcon />
+                        <span>Limpar conversa</span>
+                      </button>
+                      {conversationDetailsCanEditBroadcast && conversationDetails.isCurrentParticipant !== false ? (
+                        <button
+                          className="chat-groupSettingsAction is-danger"
+                          onClick={() => void deleteBroadcastFromDetails(conversationDetails)}
+                          disabled={pendingBroadcastDeleteBatch?.conversationId === conversationDetails.id}
+                        >
+                          <TrashIcon />
+                          <span>
+                            {pendingBroadcastDeleteBatch?.conversationId === conversationDetails.id
+                              ? "Excluindo lista..."
+                              : "Excluir lista"}
+                          </span>
+                        </button>
+                      ) : null}
+                      {conversationDetails.isCurrentParticipant === false ? (
+                        <button
+                          className="chat-groupSettingsAction is-danger"
+                          onClick={() => removeConversationFromDetailsDrawer(conversationDetails)}
+                          disabled={conversationDetailsRemovingChat}
+                        >
+                          <CloseIcon />
+                          <span>{conversationDetailsRemovingChat ? "Removendo dos chats..." : "Remover dos chats"}</span>
+                        </button>
+                      ) : null}
+                    </div>
                   </>
                 )}
 
@@ -9494,6 +9854,103 @@ export function ChatPage() {
                 <div className="chat-empty">Não foi possível carregar os dados da conversa.</div>
               </div>
             )}
+          </div>
+        </div>
+      ) : null}
+
+      {conversationDetailsRuleManagerOpen &&
+      conversationDetailsKind === "BROADCAST" &&
+      conversationDetailsCanEditBroadcast ? (
+        <div className="chat-pickerRuleModalBackdrop" onClick={() => setConversationDetailsRuleManagerOpen(false)}>
+          <div className="chat-pickerRuleModal" onClick={(e) => e.stopPropagation()}>
+            <div className="chat-pickerRuleModal__header">
+              <div className="chat-pickerRuleModal__title">Regras automáticas da lista</div>
+              <button className="chat-iconBtn" onClick={() => setConversationDetailsRuleManagerOpen(false)}>
+                <CloseIcon />
+              </button>
+            </div>
+
+            <div className="chat-pickerRuleModal__body">
+              <div className="chat-pickerRuleModal__intro">
+                Cada regra combina <strong>empresa + setor</strong>. Quem for criado depois com essa combinação entra
+                automaticamente na lista.
+              </div>
+
+              <div className="chat-pickerRuleRows">
+                {conversationDetailsAutomaticRules.length ? (
+                  conversationDetailsAutomaticRules.map((rule, index) => (
+                    <div key={rule.id} className="chat-pickerRuleRow">
+                      <span className="chat-pickerRuleRow__index">{index + 1}</span>
+                      <select
+                        className="chat-select"
+                        value={rule.companyId ?? ""}
+                        onChange={(e) => {
+                          const nextCompanyId = e.target.value || null;
+                          updateConversationDetailsAutomaticRule(rule.id, {
+                            companyId: nextCompanyId,
+                            company: nextCompanyId
+                              ? companyRuleOptions.find((item) => item.id === nextCompanyId) ?? null
+                              : null,
+                          });
+                        }}
+                      >
+                        <option value="">Todas as empresas</option>
+                        {companyRuleOptions.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.name}
+                          </option>
+                        ))}
+                      </select>
+
+                      <select
+                        className="chat-select"
+                        value={rule.departmentId ?? ""}
+                        onChange={(e) => {
+                          const nextDepartmentId = e.target.value || null;
+                          updateConversationDetailsAutomaticRule(rule.id, {
+                            departmentId: nextDepartmentId,
+                            department: nextDepartmentId
+                              ? departmentRuleOptions.find((item) => item.id === nextDepartmentId) ?? null
+                              : null,
+                          });
+                        }}
+                      >
+                        <option value="">Todos os setores</option>
+                        {departmentRuleOptions.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.name}
+                          </option>
+                        ))}
+                      </select>
+
+                      <button
+                        type="button"
+                        className="chat-pickerRuleRow__remove"
+                        onClick={() => removeConversationDetailsAutomaticRule(rule.id)}
+                      >
+                        <TrashIcon />
+                        <span>Remover</span>
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <div className="chat-empty">Nenhuma regra criada ainda.</div>
+                )}
+              </div>
+            </div>
+
+            <div className="chat-pickerRuleModal__footer">
+              <button className="chat-confirmModal__btn" onClick={addEmptyConversationDetailsRule}>
+                <PlusIcon />
+                <span>Adicionar regra</span>
+              </button>
+              <button
+                className="chat-primaryBtn"
+                onClick={() => setConversationDetailsRuleManagerOpen(false)}
+              >
+                Concluir
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
@@ -9598,50 +10055,30 @@ export function ChatPage() {
         </div>
       ) : null}
 
-      {pendingDeleteBatch ? (
+      {pendingActionToast ? (
         <div className="chat-deleteUndoToast" role="status" aria-live="polite">
+          <div className="chat-deleteUndoToast__content">
+            <div className="chat-deleteUndoToast__status">
+              <span
+                className="chat-deleteUndoToast__timerSpinner"
+                aria-label={`${pendingActionToast.seconds} segundos restantes`}
+              >
+                <span className="chat-deleteUndoToast__spinner" aria-hidden="true">
+                  <SpinnerIcon />
+                </span>
+                <span className="chat-deleteUndoToast__timerValue">{pendingActionToast.seconds}</span>
+              </span>
+              <span className="chat-deleteUndoToast__text">{pendingActionToast.label}</span>
+            </div>
+            <button className="chat-deleteUndoToast__undo" onClick={pendingActionToast.onUndo}>
+              Desfazer
+            </button>
+          </div>
           <div className="chat-deleteUndoToast__bar">
             <div
               className="chat-deleteUndoToast__barFill"
-              style={{ width: `${Math.max(0, Math.min(100, (pendingDeleteCountdownMs / 5000) * 100))}%` }}
+              style={{ width: `${pendingActionToast.progress}%` }}
             />
-          </div>
-          <div className="chat-deleteUndoToast__content">
-            <div className="chat-deleteUndoToast__text">
-              {pendingDeleteBatch.ids.length}{" "}
-              {pendingDeleteBatch.ids.length === 1 ? "mensagem apagada para você." : "mensagens apagadas para você."}
-            </div>
-            <button className="chat-deleteUndoToast__undo" onClick={undoPendingDeleteBatch}>
-              Desfazer{pendingDeleteCountdownSeconds ? ` (${pendingDeleteCountdownSeconds})` : ""}
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      {pendingConversationHideBatch || pendingConversationClearBatch ? (
-        <div className="chat-deleteUndoToast" role="status" aria-live="polite">
-          <div className="chat-deleteUndoToast__bar">
-            <div
-              className="chat-deleteUndoToast__barFill"
-              style={{ width: `${Math.max(0, Math.min(100, (pendingConversationCountdownMs / 5000) * 100))}%` }}
-            />
-          </div>
-          <div className="chat-deleteUndoToast__content">
-            <div className="chat-deleteUndoToast__text">
-              {pendingConversationHideBatch
-                ? `${pendingConversationHideBatch.ids.length} ${
-                    pendingConversationHideBatch.ids.length === 1 ? "chat apagado para você." : "chats apagados para você."
-                  }`
-                : pendingConversationClearBatch?.keepFavorites
-                ? "Conversa limpa para você, favoritas mantidas."
-                : "Conversa limpa para você."}
-            </div>
-            <button
-              className="chat-deleteUndoToast__undo"
-              onClick={pendingConversationHideBatch ? undoPendingConversationHide : undoPendingConversationClear}
-            >
-              Desfazer{pendingConversationCountdownSeconds ? ` (${pendingConversationCountdownSeconds})` : ""}
-            </button>
           </div>
         </div>
       ) : null}
@@ -9662,7 +10099,16 @@ export function ChatPage() {
         </div>
       ) : null}
 
-      {toastMessage ? <div className="chat-toast">{toastMessage}</div> : null}
+      {toastState ? (
+        <div className={`chat-toast${toastState.tone === "success" ? " chat-toast--success" : ""}`} role="status" aria-live="polite">
+          {toastState.tone === "success" ? (
+            <span className="chat-toast__icon" aria-hidden="true">
+              <CheckCircleIcon />
+            </span>
+          ) : null}
+          <span className="chat-toast__label">{toastState.message}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
